@@ -9,13 +9,19 @@ import {
   FaHome,
   FaPlaneDeparture,
   FaSatellite,
+  FaWifi,
+  FaEthernet,
+  FaBroadcastTower,
 } from 'react-icons/fa';
 import { ConfirmDialog } from './ui';
 import PrecisionMoveDialog from './PrecisionMoveDialog';
+import TakeoffDialog from './TakeoffDialog';
 import { FIELD_NAMES } from '../constants/fieldMappings';
 import { getFlightModeTitle } from '../utilities/flightModeUtils';
 import { getMissionDisplayContext } from '../utilities/missionUtils';
-import { formatCompactDroneIdentity } from '../utilities/missionIdentityUtils';
+import { formatCompactDroneIdentity, normalizeRuntimeIp } from '../utilities/missionIdentityUtils';
+import { getFleetNetworkStatus } from '../features/fleet-overview/fleetNetworkStatus';
+import { getAircraftAvailability } from '../features/fleet-overview/fleetAvailability';
 import { getPlotThemeColors } from '../utilities/plotThemeColors';
 import { buildActionCommand } from '../services/droneApiService';
 import { submitCommandWithLifecycleFeedback } from '../utilities/commandLifecycleFeedback';
@@ -88,7 +94,7 @@ TacticalMetric.propTypes = {
   help: PropTypes.string,
 };
 
-const TacticalDroneCard = ({ drone, onClose, className = '' }) => {
+const TacticalDroneSummary = ({ drone, onClose, className = '' }) => {
   const [pendingAction, setPendingAction] = useState(null);
   const [precisionMoveOpen, setPrecisionMoveOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -102,9 +108,10 @@ const TacticalDroneCard = ({ drone, onClose, className = '' }) => {
   const markerColor = resolveMarkerColor(drone?.marker_color);
   const missionDisplay = getMissionDisplayContext(drone?.mission, drone?.last_mission);
   const flightMode = getFlightModeTitle(drone?.flight_mode);
-  const gpsFix = GPS_FIX_LABELS[Number(drone?.gps_fix_type)] || 'GPS n/a';
-  const latitude = Number(drone?.position?.[0] ?? drone?.geoPosition?.[0]);
-  const longitude = Number(drone?.position?.[1] ?? drone?.geoPosition?.[1]);
+  const gpsFix = drone?.gps_fix_type == null || String(drone.gps_fix_type).trim() === ''
+    ? 'GPS n/a' : GPS_FIX_LABELS[Number(drone.gps_fix_type)] || 'GPS n/a';
+  const latitude = Number(drone?.geoPosition?.[0] ?? drone?.position?.[0]);
+  const longitude = Number(drone?.geoPosition?.[1] ?? drone?.position?.[1]);
   const hasMapCoordinate = Number.isFinite(latitude)
     && Number.isFinite(longitude)
     && (Math.abs(latitude) > 0.000001 || Math.abs(longitude) > 0.000001);
@@ -124,13 +131,17 @@ const TacticalDroneCard = ({ drone, onClose, className = '' }) => {
   const altitudeHelp = altitudeAvailable
     ? (altitudeHelpBySource[altitudeReading.source] || 'Source-aware altitude from telemetry policy.')
     : positionUnavailableReason;
-  const distanceToHome = globalPositionValid && Number.isFinite(Number(drone?.distance_to_home_m))
+  const hasDistance = drone?.distance_to_home_m != null && String(drone.distance_to_home_m).trim() !== '' && Number.isFinite(Number(drone.distance_to_home_m));
+  const distanceToHome = globalPositionValid && hasDistance
     ? `${formatNumber(drone.distance_to_home_m)} m`
     : 'Map n/a';
   const armed = drone?.is_armed === true ? 'Armed' : drone?.is_armed === false ? 'Disarmed' : 'Arm n/a';
   const lastSeen = formatLastUpdate(drone?.last_update);
-  const followLabel = Number(drone?.follow_mode) === 0 ? 'Leader' : `H${drone.follow_mode}`;
+  const followLabel = drone?.follow_mode == null ? 'Role unknown' : Number(drone.follow_mode) === 0 ? 'Leader' : `H${drone.follow_mode}`;
   const isArmed = drone?.is_armed === true;
+  const presence = getAircraftAvailability(drone, Date.now());
+  const network = getFleetNetworkStatus(drone?.heartbeat_network_info, presence.available && !presence.stale);
+  const NetworkIcon = network.type === 'wifi' ? FaWifi : network.type === 'ethernet' ? FaEthernet : FaBroadcastTower;
   const actionTargetLabel = displayTitle || identity;
   const actionTargetDescriptor = hardwareSubtitle || identity;
 
@@ -221,7 +232,7 @@ const TacticalDroneCard = ({ drone, onClose, className = '' }) => {
           <p className="tactical-drone-card__eyebrow">
             <span aria-label={`Last telemetry update ${lastSeen}`} data-help="Last telemetry update">
               <FaClock aria-hidden="true" />
-              {lastSeen}
+              Aircraft
             </span>
           </p>
           <h3>{displayTitle}</h3>
@@ -242,7 +253,7 @@ const TacticalDroneCard = ({ drone, onClose, className = '' }) => {
 
       <div className="tactical-drone-card__metrics" aria-label="Drone health summary">
         <TacticalMetric icon={FaCompass} label="Altitude" value={altitudeAvailable ? formatAltitudeMeters(altitudeReading.value, altitudeReading.label) : 'Alt n/a'} help={altitudeHelp} />
-        <TacticalMetric icon={FaHome} label="Distance home" value={globalPositionValid && Number.isFinite(Number(drone?.distance_to_home_m)) ? `${formatMetricNumber(drone.distance_to_home_m)} m` : distanceToHome} help={globalPositionValid ? 'Horizontal distance to cached home position' : positionUnavailableReason} />
+        <TacticalMetric icon={FaHome} label="Distance home" value={globalPositionValid && hasDistance ? `${formatMetricNumber(drone.distance_to_home_m)} m` : distanceToHome} help={globalPositionValid ? 'Horizontal distance to cached home position' : positionUnavailableReason} />
         <TacticalMetric icon={FaBatteryHalf} label="Battery" value={batteryStatus.text === 'N/A' ? 'Batt n/a' : batteryStatus.text} help={batteryStatus.help} />
         <TacticalMetric icon={FaSatellite} label="GPS" value={`${gpsFix}${drone?.satellites_visible ? `/${drone.satellites_visible}` : ''}`} />
       </div>
@@ -253,6 +264,16 @@ const TacticalDroneCard = ({ drone, onClose, className = '' }) => {
         <span aria-label={`Current mission ${missionDisplay.currentMissionName || 'No mission'}`} data-help="Current mission">{missionDisplay.currentMissionName || 'No mission'}</span>
         <span aria-label={`Follow role ${followLabel}`} data-help="Follow role">{followLabel}</span>
       </div>
+
+      <details className="tactical-drone-card__details">
+        <summary>Details</summary>
+        <dl>
+          <div><dt>Configured IP</dt><dd>{normalizeRuntimeIp(drone?.ip) || 'Unknown'}</dd></div>
+          <div><dt>Network</dt><dd><NetworkIcon aria-hidden="true" />{' '}{network.label}{network.percent !== null ? ` · ${Math.round(network.percent)}%` : ''}{network.stale ? ' · last known' : ''}</dd></div>
+          <div><dt>Interface</dt><dd>{network.interface || 'Unknown'}</dd></div>
+          <div><dt>Last telemetry</dt><dd>{lastSeen}</dd></div>
+        </dl>
+      </details>
 
       <div className="tactical-drone-card__actions" aria-label={`${displayTitle} quick controls`}>
         {quickActions.map((action) => {
@@ -288,14 +309,20 @@ const TacticalDroneCard = ({ drone, onClose, className = '' }) => {
       </div>
 
       <ConfirmDialog
-        open={Boolean(pendingAction)}
+        open={Boolean(pendingAction) && pendingAction.actionType !== DRONE_ACTION_TYPES.TAKE_OFF}
         title="Confirm Drone Action"
         message={pendingAction ? `${pendingAction.help}. Confirm ${pendingAction.label} for ${actionTargetLabel}?` : ''}
         confirmLabel={pendingAction?.label || 'Confirm'}
         busy={submitting}
+        appearance="console"
         onConfirm={() => submitActionCommand(pendingAction)}
         onCancel={() => setPendingAction(null)}
       />
+
+      <TakeoffDialog open={pendingAction?.actionType === DRONE_ACTION_TYPES.TAKE_OFF}
+        command={{ mission_type: DRONE_ACTION_TYPES.TAKE_OFF, trigger_time: 0, target_drone_ids: [String(hwId)],
+          uiMeta: { operatorLabel: 'Takeoff', targetLabel: actionTargetLabel } }}
+        aircraft={[drone]} onClose={() => setPendingAction(null)} />
 
       <PrecisionMoveDialog
         isOpen={precisionMoveOpen}
@@ -316,6 +343,11 @@ const TacticalDroneCard = ({ drone, onClose, className = '' }) => {
     </section>
   );
 };
+
+// Inspection identity owns all dialog/jog state. Selecting a different aircraft
+// disposes that state instead of silently retargeting an open review.
+const TacticalDroneCard = props => <TacticalDroneSummary
+  key={String(props.drone?.[FIELD_NAMES.HW_ID] ?? props.drone?.hw_id ?? '')} {...props} />;
 
 TacticalDroneCard.propTypes = {
   drone: PropTypes.shape({

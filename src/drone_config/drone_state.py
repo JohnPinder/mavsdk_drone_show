@@ -80,6 +80,7 @@ class DroneState:
         self.drone_setup: Any = None
         self.current_command_id: Optional[str] = None  # For command tracking
         self.runtime_takeoff_altitude: Optional[float] = None  # Runtime override for takeoff command
+        self.takeoff_mode: Optional[str] = None  # Command-owned; never a saved flight preference
         self.update_branch: Optional[str] = None
         self.ground_test_request_file: Optional[str] = None
         self.quickscout_mission_id: Optional[str] = None
@@ -87,6 +88,7 @@ class DroneState:
         self.quickscout_return_behavior: Optional[str] = None
         self.precision_move_request_file: Optional[str] = None
         self.smart_swarm_request: Optional[Dict[str, Any]] = None
+        self.swarm_trajectory_request: Optional[Dict[str, Any]] = None
 
         # Phase 2: Auto Global Origin Correction flags
         self.auto_global_origin: Optional[bool] = None

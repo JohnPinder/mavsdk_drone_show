@@ -35,6 +35,55 @@ from src.security.auth import (
 from src.ulog_service import UlogJobConflictError, UlogTransportTimeoutError
 
 
+def test_embedded_api_preserves_standard_scheduler_subprocess_loop(api_server, monkeypatch):
+    configurations = []
+    server = Mock()
+    monkeypatch.setattr("src.drone_api_server.uvicorn.Config", lambda **kwargs: configurations.append(kwargs) or kwargs)
+    monkeypatch.setattr("src.drone_api_server.uvicorn.Server", lambda config: server)
+
+    api_server.run()
+
+    assert configurations[0]["loop"] == "asyncio"
+    assert configurations[0]["reload"] is False
+    server.run.assert_called_once_with()
+
+
+@pytest.mark.parametrize("exit_with_error", [False, True])
+async def test_drone_api_lifespan_cancels_and_awaits_both_task_groups(api_server, exit_with_error):
+    cancelled = []
+
+    async def pending_task(name):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(name)
+
+    ulog_task = asyncio.create_task(pending_task("ulog"))
+    command_task = asyncio.create_task(pending_task("command"))
+    api_server._ulog_download_tasks.add(ulog_task)
+    api_server._command_followup_tasks.add(command_task)
+
+    async def serve():
+        async with api_server.app.router.lifespan_context(api_server.app):
+            await asyncio.sleep(0)
+            assert not ulog_task.done()
+            assert not command_task.done()
+            if exit_with_error:
+                raise RuntimeError("application exit")
+
+    if exit_with_error:
+        with pytest.raises(RuntimeError, match="application exit"):
+            await serve()
+    else:
+        await serve()
+
+    assert cancelled == ["ulog", "command"]
+    assert ulog_task.cancelled()
+    assert command_task.cancelled()
+    assert not api_server._ulog_download_tasks
+    assert not api_server._command_followup_tasks
+
+
 def _commit_mock_command(mock_drone_config, command_data):
     """Apply and prove the same typed install contract as DroneCommunicator."""
     mission_type = int(command_data["mission_type"])
@@ -66,7 +115,7 @@ def _set_fresh_airborne_state(mock_drone_config, *, relative_altitude_m=5.0):
     mock_drone_config.custom_mode = (4 << 16) | (3 << 24)
 
 
-def _ready_launch_probe(hw_id="1"):
+def _ready_launch_probe(hw_id="1", mission_type=None):
     now_ms = int(time.time() * 1_000)
     return {
         "hw_id": str(hw_id),
@@ -75,6 +124,11 @@ def _ready_launch_probe(hw_id="1"):
         "summary": "ready for mission startup",
         "observation": {
             "schema_version": 1,
+            **({'mission_type': mission_type, 'admission': {
+                'predicate': 'takeoff_ground_disarmed', 'ready': True,
+                'checks': {name: True for name in ('connection_live', 'connection_continuous',
+                    'armed_fresh', 'landed_state_fresh', 'disarmed', 'on_ground')},
+            }} if mission_type in {10, 4} else {}),
             "observation_id": f"route-test-{now_ms}",
             "source": "test.health+battery",
             "observed_at_ms": now_ms,
@@ -97,7 +151,7 @@ def _prepared_launch_headers(api_server, command):
         LaunchPreparationBinding.from_command(parsed)
     )
     api_server._probe_live_armability = AsyncMock(
-        return_value=_ready_launch_probe(api_server.drone_config.hw_id)
+        return_value=_ready_launch_probe(api_server.drone_config.hw_id, parsed.mission_type)
     )
     return {LAUNCH_PREPARATION_TOKEN_HEADER: token}
 
@@ -166,6 +220,7 @@ class TestDroneStateTelemetryFields:
     def test_state_preserves_altitude_policy_evidence(self, api_server):
         payload = api_server._serialize_drone_state_payload(
             {
+                "hw_id": 1,
                 "pos_id": 1,
                 "detected_pos_id": 1,
                 "state": 0,
@@ -228,6 +283,7 @@ class TestNodeEnvironment:
         identity_file.write_text('{"hw_id": 1, "runtime_mode": "real"}\n', encoding="utf-8")
         monkeypatch.setenv("MDS_LOCAL_ENV_FILE", str(local_env))
         monkeypatch.setenv("MDS_NODE_IDENTITY_FILE", str(identity_file))
+        monkeypatch.delenv("MDS_MODE", raising=False)
 
         response = test_client.get("/api/v1/system/env")
 
@@ -709,7 +765,7 @@ class TestDroneState:
         grpc_port, system_address = api_server._resolve_live_probe_connection()
 
         assert grpc_port == NetworkDefaults.GRPC_BASE_PORT
-        assert system_address == "udp://:14540"
+        assert system_address == "udpin://0.0.0.0:14540"
 
     @pytest.mark.asyncio
     async def test_probe_live_armability_starts_temporary_server(self, api_server, monkeypatch, mock_params):
@@ -782,7 +838,7 @@ class TestDroneState:
         assert captured["ensure"] == (50040, 14540)
         assert captured["mavsdk_server_address"] == "127.0.0.1"
         assert captured["grpc_port"] == 50040
-        assert captured["system_address"] == "udp://:14540"
+        assert captured["system_address"] == "udpin://0.0.0.0:14540"
         assert captured["wait_called"] is True
         assert captured["stopped_process"] is fake_process
 
@@ -889,7 +945,7 @@ class TestDroneState:
     def test_refresh_px4_param_snapshot_success(self, test_client, api_server, monkeypatch):
         class FakeParamPlugin:
             async def get_all_params(self):
-                from mavsdk.param import AllParams, IntParam
+                from mavsdk_grpc.param import AllParams, IntParam
 
                 return AllParams(
                     int_params=[IntParam("MAV_SYS_ID", 1)],
@@ -993,6 +1049,10 @@ class TestDroneState:
         assert "armed" in response.json()["detail"]
 
     def test_apply_px4_param_patch_success(self, test_client, api_server, monkeypatch):
+        class FakeTelemetry:
+            async def armed(self):
+                yield False
+
         class FakeParamPlugin:
             def __init__(self):
                 self.values = {"MAV_SYS_ID": 1}
@@ -1015,6 +1075,7 @@ class TestDroneState:
             {
                 "param": FakeParamPlugin(),
                 "component_information": None,
+                "telemetry": FakeTelemetry(),
             },
         )()
 
@@ -1234,12 +1295,15 @@ class TestDroneState:
         scheduled = []
 
         async def fake_with_local_system(operation):
-            return await operation(object())
-
-        def fake_create_task(coro):
-            scheduled.append(True)
-            coro.close()
-            return Mock()
+            from types import SimpleNamespace
+            async def samples(value):
+                yield value
+                await asyncio.Event().wait()
+            drone = SimpleNamespace(
+                core=SimpleNamespace(connection_state=lambda: samples(SimpleNamespace(is_connected=True))),
+                telemetry=SimpleNamespace(armed=lambda: samples(False)),
+            )
+            return await operation(drone)
 
         monkeypatch.setattr(api_server, "_with_local_ulog_system", fake_with_local_system)
         monkeypatch.setattr(
@@ -1268,7 +1332,8 @@ class TestDroneState:
             ),
         )
         monkeypatch.setattr(api_server, "_run_ulog_download_job", AsyncMock(return_value=None))
-        monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+        monkeypatch.setattr(api_server._ulog_service, "claim_download_start", AsyncMock(return_value=True))
+        monkeypatch.setattr(api_server, "_start_ulog_download_task", lambda _job_id: scheduled.append(True))
 
         headers = ulog_machine_headers(ULOG_OP_DOWNLOAD_CREATE)
         headers["X-MDS-ULog-Job-Token"] = "test-capability"

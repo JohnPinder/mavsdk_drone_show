@@ -83,6 +83,7 @@ from src.enums import CommandErrorCode, CommandOutcome, CommandPhase, CommandSta
 from src.execution_evidence import normalize_execution_evidence
 from mds_logging import get_logger
 from command_journal import CommandJournal, CommandJournalError
+from coordinated_takeoff import CoordinatedTakeoffTrackerMixin, public_snapshot as takeoff_snapshot
 
 logger = get_logger("command_tracker")
 
@@ -227,7 +228,7 @@ class TrackedCommand:
     error_summary: Optional[str] = None
 
 
-class CommandTracker:
+class CommandTracker(CoordinatedTakeoffTrackerMixin):
     """
     Thread-safe command lifecycle tracker.
 
@@ -269,6 +270,7 @@ class CommandTracker:
         self._commands: OrderedDict[str, TrackedCommand] = OrderedDict()
         self._idempotency_index: Dict[str, str] = {}
         self._lock = asyncio.Lock()
+        self._takeoff_boot_id = secrets.token_urlsafe(24)
         # Durable runtimes derive capabilities from a versioned host-local key
         # owned by CommandJournal. Isolated in-memory trackers retain an
         # ephemeral key so direct unit tests do not write host state.
@@ -295,6 +297,10 @@ class CommandTracker:
                     self._stats[key] = max(0, int(persisted_stats[key]))
             for payload in persisted_commands:
                 command = self._tracked_command_from_journal(payload)
+                barrier = command.params.get('_coordinated_takeoff')
+                if barrier and command.phase != CommandPhase.TERMINAL and barrier.get('phase') != 'airborne':
+                    barrier.update(phase='aborted', reason='Ground system restarted; review and retry takeoff')
+                    self._journal.save_command(command, stats=self._stats, event_type='takeoff_restart_fenced')
                 self._commands[command.command_id] = command
                 if command.idempotency_key:
                     if command.idempotency_key in self._idempotency_index:
@@ -1507,7 +1513,38 @@ class CommandTracker:
         command.updated_at = timestamp
         return True
 
-    async def record_swarm_runtime(self, report, callback_capability=None):
+    async def swarm_node_evidence(self, hw_ids, revision):
+        from swarm_node_evidence import swarm_node_evidence
+        async with self._lock:
+            result = swarm_node_evidence(self._commands.values(), hw_ids, revision, int(time.time() * 1000))
+            for row in result.values():
+                command = self._commands.get(row['command_id'])
+                if command and self._is_terminal(command):
+                    row['stale'] = True
+            return result
+
+    async def pending_swarm_references(self, report, callback_capability=None):
+        """Authenticated source IDs only when the startup barrier can release.
+
+        Native reference reads happen outside this journal's lock. They are not
+        required after engagement; existing node-local link policy stays owner.
+        """
+        async with self._lock:
+            command = self._commands.get(report.command_id)
+            if command is None or not self._callback_capability_matches_locked(command, report.hw_id, callback_capability):
+                raise CommandCallbackAuthenticationError('Command callback authentication failed')
+            snapshot = command.params.get('smart_swarm') or {}
+            if self._is_terminal(command) or command.params.get('_swarm_engaged') or command.params.get('_swarm_stop_requested') or report.phase != 'ready':
+                return []
+            now = int(time.time() * 1000)
+            reports = command.params.get('_swarm_runtime', {})
+            ready = all(hw == report.hw_id or (
+                reports.get(hw, {}).get('phase') in {'ready','active','acquiring','settling','tracking','tracking_degraded','holding'}
+                and now - reports[hw]['received_at_ms'] <= 15000
+            ) for hw in command.target_drones)
+            return snapshot.get('reference_hw_ids', []) if ready else []
+
+    async def record_swarm_runtime(self, report, callback_capability=None, *, reference_valid_until=0):
         """Accept role evidence/leases, not merely subprocess creation.
 
         The startup barrier coordinates roles before followers engage. Once
@@ -1554,7 +1591,8 @@ class CommandTracker:
                 and now - reports[hw]["received_at_ms"] <= 15000
                 for hw in command.target_drones
             )
-            if all_ready and not failed_targets:
+            references_ready = not snapshot.get('reference_hw_ids') or reference_valid_until > time.monotonic()
+            if all_ready and not failed_targets and references_ready:
                 command.params["_swarm_engaged"] = True
             # A per-target deadline prevents one healthy leader from extending
             # a missing follower's startup/heartbeat indefinitely.
@@ -1861,17 +1899,21 @@ class CommandTracker:
                 event_data={"success": bool(success)},
             )
 
+        execution_label = (
+            normalized_outcome.value if normalized_outcome is not None
+            else 'success' if success else 'failed'
+        )
         if recorded_late_execution:
             logger.info(
                 f"Late execution recorded without lifecycle mutation: {hw_id} -> "
-                f"{'success' if success else 'failed'} for {command_id[:8]}..."
+                f"{execution_label} for {command_id[:8]}..."
             )
         else:
             logger.info(
-                f"Execution recorded: {hw_id} -> {'success' if success else 'failed'} "
+                f"Execution recorded: {hw_id} -> {execution_label} "
                 f"for {command_id[:8]}... ({command.executions_received}/{command.acks_accepted})"
             )
-            if not success:
+            if not success and normalized_outcome != DroneExecutionOutcome.SUPERSEDED:
                 reason = self._compact_execution_reason(error_message)
                 if not reason and exit_code is not None:
                     reason = f"exit code {exit_code}"
@@ -2063,6 +2105,8 @@ class CommandTracker:
                     continue
                 if swarm:
                     command.params["_swarm_stop_requested"] = True
+                if command.params.get('_coordinated_takeoff'):
+                    command.params['_coordinated_takeoff'].update(phase='aborted', reason='Stopped by a newer recovery command')
                 pending = not command.execution_starts and not command.executions
                 if swarm:
                     pending = not command.params.get("_swarm_engaged")
@@ -2598,7 +2642,8 @@ class CommandTracker:
             'mission_type': command.mission_type,
             'mission_name': command.mission_name,
             'target_drones': list(command.target_drones),  # Copy list too
-            'params': dict(command.params),  # Copy dict
+            'params': {key: value for key, value in command.params.items() if key != '_coordinated_takeoff'},
+            'coordinated_takeoff': takeoff_snapshot(command),
             'swarm_runtime': runtime_summary(command.params, command.target_drones,
                                               terminal=self._is_terminal(command)),
             'status': command.status.value,

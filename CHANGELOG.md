@@ -9,6 +9,435 @@ and this project uses simple two-part versioning: `X.Y` (Major.Minor).
 
 ## [Unreleased]
 
+- Overview aircraft cards use one aligned GNSS/altitude/link/battery strip,
+  a compact percentage gauge and a single aircraft/state anchor. Cached values
+  retain provenance without repeated labels; keyboard descriptions no longer
+  cover warnings. Selection, freshness and aircraft command policies are unchanged.
+
+- Aircraft selectors no longer focus their search field automatically on touch
+  devices. Desktop search focus and safe flight-confirmation focus are retained.
+
+### Shared observations and recoverable communications
+
+- Shared authenticated browser resource ownership replaces independent fleet
+  readers in Overview, Globe and canonical workspace hooks; shell fleet alerts
+  continue across navigation. Retained observations age through silence and
+  late callbacks cannot cross operator/runtime contexts.
+- GCS/node WebSocket publishers sample/encode bounded latest-state generations
+  once for subscribers. Optional v1 GCS metadata provides epoch/sequence/full
+  snapshot identity while retaining manual/third-party HTTP and legacy WS.
+- Aircraft supervisory and direct follower motion acquisition keep HTTP fallback
+  effective during bounded WS probes, validate useful state and fence stale
+  responses. Motion gains, native admission/recovery and exact command targets
+  are unchanged; commands/logs/files are not placed in a lossy telemetry queue.
+- Heartbeat diagnostics distinguish HTTP success from semantic acceptance.
+  Local MAVLink ingress binds FC/sensor source identities without assuming
+  hardware ID equals MAVLink system ID. WS authorization validates browser
+  origins/read roles and periodically rechecks existing credential authority.
+
+### Quiet fleet instruments and truthful link attention
+
+- Overview Board/List use measured Wi-Fi arcs and a filled battery gauge with
+  its percentage inside. Hover, keyboard focus and the existing touch inspector
+  retain voltage, SSID and signal details; unknown/stale readings and Ethernet
+  remain distinct. No new UI dependency or percentage-based battery policy.
+- Routine link warnings settle for 3 s and clear after 2 s of stable recovery.
+  Raw ages/unknown flight states and urgent PX4/battery conditions remain
+  immediate; native readiness, command recipients and flight safeguards do not
+  change. Configuration refresh failure is no longer a telemetry-outage alarm.
+- Fleet telemetry REST/WS join current accepted heartbeat metadata on read, so
+  FC polling backoff cannot freeze the companion receipt or Wi-Fi report.
+  Snapshots do not mutate the cached sample or invent a newer FC timestamp.
+
+### Consistent mission recipients and actionable return status
+
+- Smart Swarm shares one **To** choice across Takeoff, Start and Managed Return.
+  Accepted reduced Takeoff targets carry forward; cancelled edits do not. Exact
+  selections survive navigation in the same browser session/operator/cluster;
+  reconnects never add aircraft. **Hold all** remains whole-cluster recovery.
+- Managed Return rejects an omitted tracked follower before returning its
+  source, with another check before each RTL. It neither expands targets nor
+  changes roles. A failed initial Hold identifies unavailable aircraft and
+  explicitly reports that no RTL commands were sent.
+- Start review retains named unavailable/blocking evidence instead of replacing
+  it with a generic Checking indicator when a different readiness lease expires.
+  Expired ready evidence still cannot authorize dispatch.
+
+### Shared recipient controls and selected Smart Swarm Start
+
+- Overview card checkboxes update the existing **To** state; card inspection,
+  display filters and green readiness symbols remain independent.
+- Smart Swarm defaults to its complete first cluster. Its **To** chooser also
+  permits deliberate subsets and individual follower retries, without changing
+  saved roles or restarting unselected leaders. Empty/missing selections stay
+  explicit across telemetry refreshes. **Hold all** retains whole-cluster
+  recovery; Managed Return uses the same explicit recipients as launch.
+- Selected Start checks unselected upstream aircraft as read-only references.
+  Native airborne/freshness/recovery and live-follow checks apply before
+  dispatch and at the startup barrier. After engagement, existing aircraft-local
+  link/recovery policy remains authoritative. Older companions keep normal
+  full-cluster compatibility but require an update for reference-based Start.
+- Operate observes runtime ownership per aircraft, so a healthy old leader
+  session cannot hide a later follower retry. Lost receipts use the original
+  command lookup rather than replay or broader targets.
+
+### Explicit command recipients, quiet fleet display
+
+- Overview separates eye-marked display tools from a single **To** chooser
+  beside flight controls. Card bodies and map markers inspect; card checkboxes
+  offer a quick edit of the same recipient state without another toolbar.
+- The searchable chooser stages exact aircraft IDs until **Use N aircraft**.
+  Cancel, filtering, reconnects, cluster changes and later arrivals cannot
+  retarget commands. Empty/missing saved selections and existing native
+  readiness, request identity and unavailable-aircraft reviews are preserved.
+- Hidden-recipient counts now include selected aircraft omitted from Map for
+  lack of current position. Takeoff shares the controlled choice-row style,
+  while keeping its own frozen roster and launch checks.
+- Shared aircraft search requires explicit separators for structured filters;
+  ordinary callsigns beginning with field keywords are no longer misread as
+  hardware/position filters.
+
+### Quiet software attention and grounded migration
+
+- Mission Config is focused on aircraft/slot editing with scoped, theme-aware
+  controls. Drone Show owns expected/live launch plot and map review, with direct
+  links back to the selected aircraft; the unused PositionTabs wrapper and
+  show-only editor polling are retired. Map/globe inspection uses a flat console
+  surface and resets all action/jog state when the inspected hardware changes.
+- Shared-shell software attention uses one flat review notice, distinguishes
+  unknown evidence from confirmed revision differences and never prepares an
+  update by navigation. Polling is sequential/cancellable and retains aging
+  evidence through brief outages; dismissals track affected revisions.
+- Source attention uses the existing Available review window through brief
+  aircraft dropouts, without relaxing update eligibility. Missing presence
+  evidence returns unavailable instead of an incorrect all-clear response.
+- Overview link state uses radio/clock/disconnected symbols and measured signal
+  instead of repeating Fresh/Stale on every card. Hover and inspection retain
+  the full labels, freshness evidence and unchanged command scope.
+- Aircraft details and card icons distinguish the companion-reported Wi-Fi,
+  Ethernet and other network transports. A secondary Wi-Fi radio cannot supply
+  a misleading signal for a primary Ethernet link; stale/missing evidence is
+  explicit and older single-transport reports remain compatible.
+- Unknown Git worktree reports cannot count as both synced and unknown. Managed
+  sidecar fetches retain named tags to avoid unnecessary reinstallation; staged
+  virtual-environment links stay outside Git changes.
+
+- Companion setup pins Smart Wi-Fi Manager v2.1.14 with its existing browser
+  login/CSRF workflow. Credentials stay sidecar-local and survive reconcile;
+  no remote-write bypass or second MDS authentication mode is introduced.
+  Reconcile checks dashboard runtime identity instead of trusting a source tag
+  or unchanged profile hash after an incomplete installation.
+
+- The host Smart Swarm validator waits for the UI's native Start review after
+  Takeoff and retains structured HTTP rejection evidence. It does not queue or
+  replay Start, add a flight policy, or change aircraft runtime behavior.
+
+- The embedded companion API keeps the standard asyncio loop instead of
+  Uvicorn's automatic process-wide uvloop policy. This prevents a reproduced
+  mission/recovery subprocess hang in native gRPC's child fork handler while
+  preserving controller process groups, evidence FDs and flight admission.
+
+- Integrated SITL validation now checks the existing ground-only trajectory
+  admission while airborne instead of requesting an unsupported handoff. It
+  verifies non-dispatch and continued live following before leader Hold/jog.
+  Phase waits fail immediately on incompatible terminal receipts and retain the
+  native preparation reason instead of spending the full polling timeout.
+
+### Maintained flight SDK and image dependency baseline
+
+- Migrated from the shadowing vendored SDK to installed `mavsdk-grpc==4.0.5`
+  and its matching native server. One manifest governs Python pins, server
+  hashes and supported platforms across bootstrap, maintenance and SITL.
+  Provisioning verifies a bounded candidate before activation and preserves
+  rollback artifacts; custom overrides remain explicitly unverified choices.
+- Updated compatible security dependencies, removed unused Flask packages and
+  migrated the companion API to FastAPI lifespan cleanup. SDK stdout/stderr
+  drains concurrently and preserves native severity; explicit UDP listeners
+  retain the existing transport topology. Flight gains and policies are unchanged.
+- Image preparation can provision checksum-pinned CPython 3.12.16 separately
+  from the operating system interpreter. Startup preserves a supported venv
+  instead of mistaking the old system Python for dependency drift.
+- Image Git authentication uses file-backed credentials without token URLs;
+  final filesystem and metadata gates run after staged-secret cleanup.
+  These source changes require a rebuilt and accepted SITL image, not only a
+  source tag. See [SDK maintenance](docs/guides/mavsdk-updates.md).
+- Image preparation builds the PX4/Gazebo dependency targets after header
+  updates, with bounded parallelism, so fresh aircraft do not each repeat large
+  C++ compilations. Optional separate Docker build/runtime resource budgets
+  protect shared hosts without changing aircraft admission or mission policies.
+- Prepared Gazebo runtimes launch PX4 directly in foreground daemon mode,
+  preserving the selected model/world without runtime compilation or a detached
+  interactive-console redraw loop. Missing runtime assets fail explicitly.
+- Bootstrap and image preparation include the ICMP diagnostic utility. Missing
+  or unexecutable ICMP probes report unknown instead of a false disconnected
+  link. Runtime validators retain native readiness blockers on timeout.
+- Unattended SDK-pair changes now require a prevalidated selected environment
+  before any runtime mutation. A mismatch restores the previous source commit
+  without replacing the working server/packages/services; first bootstrap stays
+  separate from migration. Compatible requirement updates use the selected Python.
+- Action and QuickScout native-output wrappers use their registered component
+  loggers, fixing an undefined logger reference that could stop pipe draining.
+- Completed MDS landing/RTL and show paths clear residual Offboard only after
+  fresh connected disarmed/ON_GROUND evidence, then verify Hold. Grounded LAND/
+  RETURN_TO_LAUNCH completion uses the same path. Other modes and
+  unknown/airborne states are untouched; recovery is never gated on this step.
+
+- PX4 Parameters adds a List / Groups switch, collapsible group headings and
+  Show all in the existing pagination control, including phones. Both layouts
+  stay virtualized for large snapshots. Search includes groups/categories;
+  alternating rows, hover/focus and a distinct inspection rail improve scanning.
+  Snapshot/stale/read-failure labels remain separate from apply targets, with
+  no changes to parameter write authority or aircraft selection.
+
+- Fixed the shared console-dialog field rule expanding radio/checkbox controls
+  to full width and clipping aircraft/source labels. Browser regression checks
+  cover Logs and PX4 Parameters pickers across responsive widths and themes.
+
+### Logs operator workspace and evidence integrity
+
+- Replaced Ops/Dev logging modes with Live / Sessions / Flight logs, one explicit
+  source, accessible record inspectors, UTC filters, bounded history and complete
+  selected-session/filter exports. Shared flat styling covers desktop, tablet and
+  phone; connection, empty, unavailable and partial-coverage states stay distinct.
+- Fixed same-second session collisions, unbounded/malformed session reads, thread
+  unsafe stream publication and silent replay/subscriber gaps. Temporary exports
+  have byte, disk, concurrency and preparation-time bounds.
+- Added metadata-only ULog request recovery and idempotency without replay after
+  an uncertain response. Ready files have explicit Save; native staging/erase use
+  fresh authoritative disarm evidence. Raw transfers remain outside optional MCP.
+- Proven pre-handoff rejection is terminal and clearly distinguished from an
+  uncertain transfer, so correcting a rejection does not leave preparation locked.
+  GCS and companion requirements now share the validated `pyulog==1.3.0` pin.
+- Mission Config no longer treats an unseen row's placeholder slot as a live
+  mismatch or offers stale slot adoption. Parameter profile component/type labels
+  have a separate line, preventing adjacent-column collisions.
+
+- PX4 Parameters uses one flat Parameters / Profiles workspace with explicit
+  aircraft inspection, complete per-target difference reviews and recoverable
+  Activity receipts. Manual edits, QGC imports and profiles share the same
+  bounded native apply/readback pipeline; duplicate writers are retired.
+- Parameter jobs persist identity before dispatch, reject changed expected
+  values and fence interrupted operations without replay. Live disarm evidence
+  is checked before each native write. Strict typed parsing and binary32 wire
+  comparison prevent fractional integer truncation, tiny-value false verification
+  and float underflow/overflow. Reference metadata remains advisory; read-only
+  agent tools remain read-only.
+- Direct and tracked PX4 reboot actions now require fresh native disarm evidence
+  and ON_GROUND when landed-state telemetry is available; unknown or stale state
+  blocks before reboot, including calls using the legacy force flag.
+
+- Custom Show now shares the flat Operate / Design & Setup layout, native
+  scheduling/recovery and themed path previews. Explicit preview regeneration
+  changes images only. Mission Config prioritizes assignments and launch layout,
+  with advanced tools collapsed and a shared accessible save-review dialog.
+  Aircraft inspectors show configured IPs; exact freshness ages move to
+  diagnostics/hints while live, stale and unavailable states remain visible.
+
+- Overview is a flat aircraft Board/List/Map with an identity-based live
+  inspector, explicit targets and general Takeoff/Hold/Land/immediate Return.
+  First-use Available and remembered selections (including empty) remain independent
+  of filtering, inspection, arrivals and reconnection. Missing telemetry is no
+  longer replaced by invented GPS or flight state. Shared resource polling is
+  sequential/cancellable, and age advances even when requests stall.
+- Overview defaults to heartbeat-observed aircraft (60 seconds), with an earlier
+  configurable stale cue (10 seconds). Cards place compact measured status around
+  a central aircraft schematic, with decoded flight modes and phase markers. Optional
+  cluster grouping changes only the display. Matching More panels freeze bulk
+  or single-aircraft scope; unavailable targets require deliberate removal or
+  acknowledgment before a bounded new dispatch. Uncertain receipts remain
+  lookup-only; flight admission, PX4 parameters and control gains are unchanged.
+- Shared navigation moves repository/clock diagnostics into System/About.
+  Command activity survives navigation; bounded session alerts distinguish
+  Seen, clear evidence and last-observed conditions without per-aircraft toasts.
+  The responsive drawer follows one viewport owner across phone/tablet/desktop.
+- Mission launchers now belong to their dedicated workspaces. Custom CSV adds
+  explicit-target local-frame operations; Drone Show adds target subsets and
+  scheduling. Both default to native synchronized **When ready**, retain explicit
+  timing choices and recover ambiguous receipts by lookup without replay.
+  Superseded Overview controllers, styles and five unused direct dependencies
+  are retired; shared command/API identities and native Takeoff remain intact.
+- Fleet action-readiness HTTP/tool capacity is aligned to 100 targets, with
+  cached-evidence evaluation and explicit missing/stale coverage.
+- Drone Show, Custom CSV and Hover Test share a configurable executor preparation
+  lead (10 seconds by default) across GCS timing, node commit and scheduling.
+  The exact synchronized trigger, native preflight/arming and one-second late
+  abort remain unchanged; unrelated action preparation timing is unchanged.
+
+- Formation setup now separates Plan formation / Capture positions from a
+  distinct, always-visible Revert action beside Undo/Redo. Opening planning or
+  cancelling capture preserves the draft; Revert confirms replacement separately.
+- Swarm Design 3D starts with all movement axes visible, including Up. Horizontal
+  and vertical plane locks remain optional; dragging still edits the local draft
+  only and follows the same NED/Body and undo/cancel contracts.
+- Smart Swarm exposes graphical planning / capture setup workflows
+  in Design and Operate. Recovery is a compact optional Unsaved draft control
+  using shared button styles; restoring legacy browser drafts preserves follow
+  relationships, and equivalent/applied drafts no longer trigger false conflicts.
+  Plan application and mission execution remain separate explicit actions.
+- Capture opens in lightweight interactive 3D with aircraft silhouettes, camera
+  controls and Top/Front/Side views. Height choices use diagrams; leader/reference
+  controls are collapsed. Native capture recommends Same height on the ground
+  and Current in settled flight; mixed/uncertain states require a choice. Explicit
+  selections survive Refresh. Existing Apply/Start boundaries and tuning are unchanged.
+- Smart Swarm capture adds linked read-only Top/Side views with distinct live
+  aircraft and frozen capture markers. One-cluster setup is automatic; multiple
+  clusters preserve explicit scope and ignore obsolete responses. Current
+  airborne heights are an explicit native-validated common-MSL option alongside
+  Keep plan and Same height. Operator reference labels are Geographic and
+  Leader-relative; `ned`/`body` contracts and flight tuning are unchanged.
+
+- Smart Swarm can capture settled aircraft spacing into its existing editable
+  draft, with NED/Body references, explicit leader choice and planned/level
+  heights. Capture is read-only; revision-aware inactive Apply remains separate
+  from Start and repository publication. Linked-view undo includes capture
+  headings and evidence. Illustrated field instructions cover the full workflow.
+- Body following converts body-axis angular rates to heading rate and projects
+  heading from its independent attitude sample clock. Gains, limits and
+  leader-loss policy are unchanged.
+- Overview ages link status independently of HTTP polling success. Offline
+  cards keep a readable link label and no longer claim cached arm/mode/mission
+  states as current.
+
+- Optional LEDs select the legacy PWM/DMA backend only on supported pre-RP1
+  Raspberry Pi hardware. CM5/Pi5 and unknown boards avoid its native initialization
+  and use the existing SPI backend when available, otherwise no LEDs. This
+  prevents an observed CM5 shutdown segfault without hiding failed action exits.
+
+- Bootstrap sidecar updates preserve local environment ownership/permissions,
+  so the service user can still load REAL mode and its GCS endpoint. MAVLink
+  auto-configuration honors explicit UART, endpoints and UDP input overrides
+  instead of silently replacing them with auto-detected defaults.
+
+- Companion MAVSDK verification uses a bounded, transport-free `--help` probe
+  instead of the unsupported `--version` argument. Installed version provenance
+  is bound to the binary hash, preventing fresh setup and final verification
+  from hanging or reporting a version for replaced bytes.
+
+- Fresh companion identity setup no longer references the retired inline-token
+  variable under strict shell mode. Credential rendering preserves externally
+  provisioned files and records only their configured paths.
+
+- Fleet credential guidance distinguishes account, deploy and maintenance SSH
+  keys; recommends distinct read-only aircraft keys, documents organization-owner
+  policy control and preserves working access during verified migration.
+
+- Companion commissioning guide now separates admin access, durable identity,
+  installation, enrollment, FC connection and final readiness. It documents
+  existing-VPN preservation, per-node read-only Git access and ground-only
+  topology changes without confusing companion provisioning with PX4 readiness.
+
+- PX4 status-text classification matches complete phrases so an airborne
+  `Disarming denied` event is preserved without becoming an `Arming denied`
+  preflight blocker. Swarm Operate distinguishes delayed telemetry from
+  confirmed offline state and does not present cached flight/preflight facts
+  as current after a preview failure.
+- Typed command supersession is presented as an informational replacement,
+  rather than a generic execution failure. Genuine failures retain warnings;
+  stored execution counts, outcomes and flight authority are unchanged.
+
+- Takeoff review uses a separate bounded five-second advisory status lifetime,
+  instead of flashing Ready for a sub-second native execution lease. Slow or
+  stalled refreshes still expire; native launch preparation, PX4 checks and
+  the all-armed barrier remain unchanged.
+
+- Launch preparation reports native readiness rejections before compatibility
+  hints; modern rejected responses advertise coordinated-Takeoff support.
+  Missing native observations reject without issuing launch authority.
+  Smart Swarm guides include privacy-reviewed reference-frame and measured
+  staggered-return illustrations.
+
+- GCS telemetry now polls peers independently with bounded async connections and
+  outage backoff. Offline demo/fleet entries no longer serially age healthy
+  aircraft snapshots. Route tests isolate host Docker discovery; production
+  callback-endpoint guards remain enforced. Formation watch authentication now
+  matches machine HTTP configuration reads under dashboard-only login.
+- Leader hard-stale timing is configurable through advanced node settings;
+  malformed recovery timings fall back safely at startup. Existing defaults,
+  automatic-promotion policy and motion gains are unchanged. The SITL Apply
+  rehearsal adds Body/NED changes, 10m spacing and guarded local leader-outage
+  validation with verified restore/landing evidence.
+
+- Smart Swarm configuration delivery adds authenticated latest-state WebSocket
+  snapshots, conditional HTTP reconciliation and bounded reconnect/fallback.
+  Canonical saves are atomic and notify before Git publication; invalid snapshots
+  retain the current plan. Reference fields install before new follower tasks
+  start, and PATCH supports revision-aware receipts. Motion telemetry, gains,
+  leader-loss policy and existing role-change semantics are unchanged. Continuous
+  moving leader handover is not implemented or flight-cleared by this change.
+
+- Takeoff reserves checkboxes for aircraft inclusion. Stable Select all/Clear
+  actions replace the master checkbox, and a distinct Launch mode radio group
+  separates All armed first from Independent execution. Confirmed operations
+  show a compact immutable settings summary. Native command behaviour is unchanged.
+
+- Takeoff review preselects its initiating aircraft scope and adds per-aircraft
+  checkboxes, select-all, muted excluded rows and an explicit confirmation count.
+  Selection freezes on confirmation and survives uncertain receipt recovery;
+  single-aircraft subsets retain independent execution. Blocked reasons remain
+  visible even with a zero group-readiness lease. Swarm Start scope is unchanged.
+
+- Standalone multi-aircraft Takeoff adds a command-bound all-armed barrier and
+  shared operator dialog across Dashboard, Smart Swarm and aircraft cards.
+  Native readiness, bounded waiting, pre-release cancellation and verified
+  ground cleanup replace independent arming/launch by default for groups.
+  Independent mode remains explicit; PX4 checks and tuning are unchanged.
+  Coordinated release reduces partial launches but is not atomic flight.
+
+- Swarm Trajectory route entry delays reflow preferred-speed legs instead of
+  treating calculated arrivals as fixed deadlines. Explicit zero values, minute
+  rounding, editable controls and dark/mobile fields are corrected. Editor
+  dialogs use one overlay host so map layers cannot intercept their controls.
+  Waypoint rows keep one compact numeric summary and selected-point controls,
+  without repeated guide cards, normal-status tags or instructional paragraphs.
+
+- Swarm Trajectory includes a slow home-loop demo with complete REAL/SITL
+  packages and tracked content-validation manifests. A reusable preparation tool
+  preserves the configured formation/origin, backs up replaced assets and checks
+  generated motion/separation. Operate now uses a read-only geographic map with
+  MSL-aware 3D when available and automatic 2D fallback.
+
+- Swarm Trajectory uses one flat, theme-aware operator console across Operate,
+  Formation, Route, Uploads, Generate, Review and confirmations. Review adds a
+  geographic map, working aircraft visibility/search and thin stable-color
+  paths. Retained files outside the mission are collapsed by default and no
+  longer inflate follower counts. No live Smart Swarm flight tuning changed.
+
+- Swarm Trajectory's first-use formation is the current Smart Swarm layout as an
+  unsaved draft. `Copy Smart Swarm` makes copying explicit; saving/customizing
+  affects only the mission snapshot, never live Smart Swarm. This source release
+  remains a trajectory-workspace candidate; coordinated Resume and flight SITL
+  acceptance are not included.
+
+- Swarm Trajectory Plan now embeds the full route editor with per-leader drafts,
+  drag editing, undo/redo, reorder, library and import/export. Existing editor
+  bookmarks redirect to Plan; the duplicate basic map editor and sidebar entry
+  are removed. Terrain uncertainty/provenance survives library/CSV roundtrips
+  instead of being upgraded to verified by missing metadata.
+  Shared operator styles load in one fixed app-shell order, independent of lazy
+  route navigation; explicit MSL remains usable without terrain lookup.
+
+- Swarm Trajectory gains an initial Plan/Operate workspace, independent mission
+  formation snapshots, whole-cluster start review, receipt recovery and typed
+  read-only workspace APIs/MCP tools. Aircraft report stale-aware commanded
+  trajectory time. Native preparation/commit reject changed package files.
+  Hold remains terminal and coordinated Pause/Resume is not enabled in this
+  checkpoint.
+
+- Mission 4 managed launches now bind reviewed trajectory hashes to hardware
+  identities and verify exact loaded bytes before arming. Staged regeneration
+  preserves prior outputs on failure, and leader drafts are isolated/recoverable.
+  Server/node updates and legacy package regeneration are required together.
+
+- Swarm Trajectory dispatch now enforces canonical package readiness for selected
+  and whole-fleet starts. Processing sessions detect changed output contents;
+  legacy sessions require regeneration. The planner no longer substitutes file
+  presence for validation or fabricates repository-save percentages.
+
+- Swarm Trajectory now loads its route before arming, rejects malformed processed
+  samples instead of silently skipping them, and requires explicit altitude and
+  finite motion data. Leader and processed routes reject negative, duplicate or
+  decreasing timestamps. Coordinated pause/resume remains under development.
+
 - Removed the spurious zero-height Drone Show warning: normal launch/landing
   samples are neutral show-relative data, not a terrain hazard. Separation
   violations now include exact overlaps between distinct aircraft; malformed
@@ -646,7 +1075,7 @@ and this project uses simple two-part versioning: `X.Y` (Major.Minor).
   for Axios, Markdown-It/Linkify-It, and PostCSS, alongside the earlier
   `shell-quote` fix, without forcing npm's invalid Create React App remediation
   or an unverified React Router major-version change.
-- Generic Catch-A-Drone improvements were reconciled into official MDS without
+- Generic deployment improvements were reconciled into official MDS without
   importing customer configuration or weaker private security behavior:
   command failures retain concise per-drone reasons, Smart Swarm distinguishes
   local save from failed Git write-back, Fleet Ops guides drift review, booting

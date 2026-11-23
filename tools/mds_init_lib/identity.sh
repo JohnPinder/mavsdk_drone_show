@@ -187,16 +187,8 @@ setup_local_env() {
             ;;
     esac
 
-    if [[ -n "$gcs_api_token" ]]; then
-        if [[ -z "$gcs_api_token_file" ]]; then
-            gcs_api_token_file="/root/.mds/keys/gcs_api_token"
-        fi
-        mkdir -p "$(dirname "$gcs_api_token_file")"
-        chmod 700 "$(dirname "$gcs_api_token_file")" 2>/dev/null || true
-        printf '%s\n' "$gcs_api_token" > "$gcs_api_token_file"
-        chmod 600 "$gcs_api_token_file"
-        log_success "Stored GCS API token in root-readable file: ${gcs_api_token_file}"
-    elif [[ -n "$gcs_api_token_file" && ! -r "$gcs_api_token_file" ]]; then
+    # Credentials are provisioned separately; init records the file path only.
+    if [[ -n "$gcs_api_token_file" && ! -r "$gcs_api_token_file" ]]; then
         log_warn "GCS API token file configured but not readable yet: ${gcs_api_token_file}"
     fi
 
@@ -316,9 +308,14 @@ remove_local_env_value() {
     fi
 
     local tmp_file
-    tmp_file=$(mktemp) || return 1
-    grep -v "^${key}=" "${MDS_LOCAL_ENV}" > "${tmp_file}" || true
-    mv "${tmp_file}" "${MDS_LOCAL_ENV}"
+    tmp_file=$(mktemp "${MDS_LOCAL_ENV}.XXXXXX") || return 1
+    if ! awk -v key="$key" 'index($0, key "=") != 1' "${MDS_LOCAL_ENV}" > "$tmp_file" ||
+        ! chmod --reference="${MDS_LOCAL_ENV}" "$tmp_file" ||
+        ! chown --reference="${MDS_LOCAL_ENV}" "$tmp_file" ||
+        ! mv "$tmp_file" "${MDS_LOCAL_ENV}"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
 }
 
 # =============================================================================

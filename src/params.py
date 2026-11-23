@@ -7,6 +7,7 @@ from pathlib import Path
 from mds_logging import get_logger
 from src.settings.deployment_profile import load_deployment_profile
 from src.settings.runtime import preload_local_env, resolve_runtime_mode
+from src.mission_timing import resolve_show_preparation_seconds
 from src.drone_api_routes import (
     DRONE_COMMANDS_ROUTE,
     DRONE_LIVE_ARMABILITY_ROUTE,
@@ -229,9 +230,15 @@ class Params:
     SMART_SWARM_CONTROL_RATE_HZ = 15.0
     SMART_SWARM_HTTP_FALLBACK_RATE_HZ = 3.0
     SMART_SWARM_CONFIG_REFRESH_INTERVAL_SEC = 2.0
+    SMART_SWARM_CONFIG_RECONCILE_INTERVAL_SEC = 30.0
+    SMART_SWARM_CONFIG_BACKOFF_MAX_SEC = 15.0
     SMART_SWARM_SOURCE_MAX_AGE_SEC = 0.75
     SMART_SWARM_OWN_STATE_MAX_AGE_SEC = 0.75
-    SMART_SWARM_HARD_STALE_TIMEOUT_SEC = 2.5
+    SMART_SWARM_HARD_STALE_TIMEOUT_SEC = _positive_env_float(
+        'MDS_SMART_SWARM_HARD_STALE_TIMEOUT_SEC', 2.5)
+    if SMART_SWARM_HARD_STALE_TIMEOUT_SEC <= SMART_SWARM_SOURCE_MAX_AGE_SEC:
+        logger.warning('Leader hard-stale timeout must exceed source freshness; using 2.5 seconds')
+        SMART_SWARM_HARD_STALE_TIMEOUT_SEC = 2.5
     SMART_SWARM_LEADER_STATE_TIMEOUT_SEC = 1.0   # Per-request timeout for follower -> leader state fetches
     SMART_SWARM_GCS_CONFIG_TIMEOUT_SEC = 2.0     # Per-request timeout for follower -> GCS swarm config refresh
     SMART_SWARM_GCS_NOTIFY_TIMEOUT_SEC = 2.0     # Per-request timeout for follower -> GCS leader-change notify
@@ -287,6 +294,16 @@ class Params:
     SMART_SWARM_LEADER_RECOVERY_STABLE_SEC = _safe_float(
         os.getenv("MDS_SMART_SWARM_LEADER_RECOVERY_STABLE_SEC", "1"), 1.0
     )
+    if not (
+        math.isfinite(SMART_SWARM_LEADER_RECOVERY_WAIT_SEC)
+        and math.isfinite(SMART_SWARM_LEADER_RECOVERY_STABLE_SEC)
+        and 0 < SMART_SWARM_LEADER_RECOVERY_STABLE_SEC < SMART_SWARM_LEADER_RECOVERY_WAIT_SEC
+    ):
+        # Reject malformed configuration at startup rather than throwing from
+        # LeaderRecoveryWindow before a protective Hold can be requested.
+        logger.warning('Invalid leader recovery timing; using wait=10s and stable=1s')
+        SMART_SWARM_LEADER_RECOVERY_WAIT_SEC = 10.0
+        SMART_SWARM_LEADER_RECOVERY_STABLE_SEC = 1.0
 
     
     csv_dt = 0.05                     # default step time of the processed CSV file to generate (s)
@@ -337,6 +354,8 @@ class Params:
     PRESENCE_RECENT_LOSS_SEC = _safe_float(os.getenv('MDS_PRESENCE_RECENT_LOSS_SEC', '30'), 30.0)
     PRESENCE_STALE_SEC = _safe_float(os.getenv('MDS_PRESENCE_STALE_SEC', '60'), 60.0)
     PRESENCE_LONG_OFFLINE_SEC = _safe_float(os.getenv('MDS_PRESENCE_LONG_OFFLINE_SEC', '300'), 300.0)
+    # Display-only stale cue; Overview retention uses canonical PRESENCE_STALE_SEC.
+    OVERVIEW_STALE_SEC = _safe_float(os.getenv('MDS_OVERVIEW_STALE_SEC', '10'), 10.0)
 
     enable_default_subscriptions = True  # All drones subscribe to each other for continuous polling
     
@@ -384,6 +403,11 @@ class Params:
     # Sleep Interval for Main Loop
     sleep_interval = 0.1           # Sleep interval for the main loop in seconds
     trigger_sooner_seconds = 4     # Trigger mission a bit early to compensate for initialization
+    # Python/MAVSDK setup only: the show executor still waits for its exact
+    # synchronized timestamp before arming. Does not advance other actions.
+    SYNCHRONIZED_SHOW_PREPARATION_SEC = resolve_show_preparation_seconds(
+        os.environ.get("MDS_SYNCHRONIZED_SHOW_PREPARATION_SEC")
+    )
 
     max_takeoff_alt = 100          # Maximum allowable takeoff altitude
     default_takeoff_alt = 10       # Default takeoff altitude
@@ -409,6 +433,8 @@ class Params:
     PX4_PARAMETER_DEFAULT_COMPONENT_ID = 1
     PX4_PARAMETER_SNAPSHOT_MAX_AGE_SEC = 60.0
     PX4_PARAMETER_MUTATION_REQUIRE_DISARMED = True
+    # Deprecated compatibility attribute; verification now requires equal
+    # binary32 transport values. This cannot widen readback/precondition checks.
     PX4_PARAMETER_FLOAT_VERIFY_TOLERANCE = 1e-6
     PX4_PARAMETER_MAVLINK_HEARTBEAT_TIMEOUT_SEC = 5.0
     PX4_PARAMETER_MAVLINK_SNAPSHOT_TIMEOUT_SEC = 45.0
@@ -420,10 +446,23 @@ class Params:
     PX4_PARAMETER_METADATA_FETCH_TIMEOUT_SEC = _safe_float(os.environ.get("MDS_PX4_PARAMETER_METADATA_FETCH_TIMEOUT_SEC", "2.5"), 2.5)
     PX4_PARAMETER_METADATA_CACHE_MAX_ENTRIES = _safe_int(os.environ.get("MDS_PX4_PARAMETER_METADATA_CACHE_MAX_ENTRIES", "4"), 4)
     PX4_PARAMETER_PROFILE_DIR = os.environ.get("MDS_PX4_PARAMETER_PROFILE_DIR", "resources/px4_param_profiles")
+    PX4_PARAMETER_STATE_MAX_BYTES = _safe_int(os.environ.get("MDS_PX4_PARAMETER_STATE_MAX_BYTES", "67108864"), 67108864)
+    PX4_PARAMETER_REVIEW_MAX_AGE_SEC = _safe_float(os.environ.get("MDS_PX4_PARAMETER_REVIEW_MAX_AGE_SEC", "300"), 300.0)
+    PX4_PARAMETER_OPERATION_STATE_DIR = os.environ.get("MDS_PX4_PARAMETER_OPERATION_STATE_DIR", "")
+    PX4_PARAMETER_OPERATION_MAX_RECORDS = _safe_int(os.environ.get("MDS_PX4_PARAMETER_OPERATION_MAX_RECORDS", "4096"), 4096)
+    PX4_PARAMETER_OPERATION_MAX_BYTES = _safe_int(os.environ.get("MDS_PX4_PARAMETER_OPERATION_MAX_BYTES", "67108864"), 67108864)
     ACTION_MAVSDK_SERVER_START_TIMEOUT_SEC = 10  # Local MAVSDK server listen deadline for standalone actions
     ACTION_VEHICLE_CONNECTION_TIMEOUT_SEC = 10  # PX4 connection deadline after MAVSDK starts
     TAKEOFF_PREFLIGHT_TIMEOUT_SEC = 30  # MAVSDK GPS/home readiness wait before takeoff
     TAKEOFF_ARMED_CONFIRM_TIMEOUT_SEC = 10  # Fresh armed-state confirmation after the arm RPC
+    # Group Takeoff only. These do not override PX4 arming or auto-disarm settings.
+    COORDINATED_TAKEOFF_ARM_BARRIER_TIMEOUT_SEC = 8.0
+    COORDINATED_TAKEOFF_REPORT_MAX_AGE_SEC = 1.0
+    COORDINATED_TAKEOFF_RELEASE_DELAY_SEC = 1.5
+    COORDINATED_TAKEOFF_RELEASE_GUARD_SEC = 0.5
+    COORDINATED_TAKEOFF_REPORT_INTERVAL_SEC = 0.2
+    COORDINATED_TAKEOFF_STATE_RATE_HZ = 5.0  # Local SDK observations, not remote GCS telemetry
+    COORDINATED_TAKEOFF_CLOCK_TOLERANCE_SEC = 0.5
     TAKEOFF_STATE_TRANSITION_TIMEOUT_SEC = 15  # PX4 TAKING_OFF/IN_AIR transition deadline
     TAKEOFF_ALTITUDE_CONFIRM_TIMEOUT_SEC = 60  # Allow slower multi-drone SITL climbs before declaring takeoff failure
     TAKEOFF_FINAL_STATE_CONFIRM_TIMEOUT_SEC = 20  # Bound the coherent IN_AIR terminal-state confirmation phase

@@ -57,6 +57,27 @@ def _callback_capabilities(drones):
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('prepared', [False, True])
+async def test_coordinated_capability_check_preserves_preflight_rejection(prepared):
+    from fleet_rpc import FleetRPCService
+    async def respond(request):
+        payload = _prepared_launch_payload(request)
+        payload['coordinated_takeoff_supported'] = False
+        if not prepared:
+            payload.update(status='rejected', ready=False, summary='Battery safety telemetry unavailable',
+                           preparation_token=None, token_ttl_ms=0, observation=None)
+        return httpx.Response(200, json=payload)
+    drones = _drones(1)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        result = await FleetRPCService(_params(), client=client).prepare_launch(drones,
+            {'mission_type': 10, 'trigger_time': 0, 'command_id': 'native-blocker', 'takeoff_mode': 'coordinated'},
+            callback_capabilities=_callback_capabilities(drones))
+    assert not result['all_prepared']
+    summary = result['results']['1']['summary']
+    assert summary == ('Update aircraft software for coordinated takeoff' if prepared else 'Battery safety telemetry unavailable')
+
+
 def _launch_tokens(drones):
     return {
         str(drone["hw_id"]): f"prepare-{drone['hw_id']}-" + ("x" * 48)
@@ -87,14 +108,14 @@ def _prepared_launch_payload(
         "summary": "ready",
         "observation": {
             "schema_version": 1,
-            **({"mission_type": 10, "admission": {
+            **({"mission_type": command["mission_type"], "admission": {
                 "predicate": "takeoff_ground_disarmed", "ready": True,
                 "checks": {
                     "connection_live": True, "connection_continuous": True,
                     "armed_fresh": True, "landed_state_fresh": True,
                     "disarmed": True, "on_ground": True,
                 },
-            }} if command["mission_type"] == 10 else {}),
+            }} if command["mission_type"] in {10, 4} else {}),
             "observation_id": f"probe-{hw_id}",
             "source": "test",
             "observed_at_ms": 1_000,
@@ -113,7 +134,8 @@ def _prepared_launch_payload(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing", ["mission_type", "admission"])
-async def test_takeoff_preparation_requires_action_specific_ground_evidence(missing):
+@pytest.mark.parametrize('mission', [10, 4])
+async def test_takeoff_preparation_requires_action_specific_ground_evidence(missing, mission):
     from fleet_rpc import FleetRPCService
     from src.enums import Mission
     async def respond(request):
@@ -123,11 +145,31 @@ async def test_takeoff_preparation_requires_action_specific_ground_evidence(miss
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         drones = _drones(1)
         service = FleetRPCService(_params(), client=client)
-        result = await service.prepare_launch(drones, {"mission_type": Mission.TAKE_OFF.value,
+        result = await service.prepare_launch(drones, {"mission_type": mission,
             "command_id": "takeoff", "trigger_time": 0},
             callback_capabilities=_callback_capabilities(drones))
         assert result["all_prepared"] is False
         assert result["results"]["1"]["ready"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reported_mission,ready', [(10, True), (4, False)])
+async def test_trajectory_prepare_rejects_wrong_mission_or_denied_ground_proof(reported_mission, ready):
+    from fleet_rpc import FleetRPCService
+    async def respond(request):
+        payload = _prepared_launch_payload(request)
+        payload['observation']['mission_type'] = reported_mission
+        payload['observation']['admission']['ready'] = ready
+        if not ready:
+            payload['observation']['admission']['checks']['disarmed'] = False
+        return httpx.Response(200, json=payload)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        drones = _drones(1)
+        service = FleetRPCService(_params(), client=client)
+        result = await service.prepare_launch(drones, {'mission_type': 4,
+            'command_id': 'trajectory', 'trigger_time': 0},
+            callback_capabilities=_callback_capabilities(drones))
+        assert result['all_prepared'] is False
 
 
 @pytest.fixture(autouse=True)
@@ -1520,7 +1562,9 @@ async def test_strict_sync_fanout_never_posts_targets_after_safe_window(monkeypa
             {
                 "mission_type": 1,
                 "command_id": "strict-sync-window",
-                "trigger_time": 1_001,
+                # Default show preparation is ten seconds; the last safe
+                # POST time remains 1001 for this transport-boundary test.
+                "trigger_time": 1_011,
             },
             operation_deadline_sec=1.0,
         )

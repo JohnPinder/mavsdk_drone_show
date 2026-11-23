@@ -4,11 +4,20 @@ import SwarmOperations from './SwarmOperations';
 import { fetchGcsResource } from '../services/gcsApiService';
 import { submitCommandWithLifecycleFeedback, trackCommandReceipt } from '../utilities/commandLifecycleFeedback';
 jest.mock('../services/gcsApiService', () => ({ fetchGcsResource: jest.fn() }));
+jest.mock('../contexts/AuthContext', () => ({ useAuth: () => ({ loading: false, user: { username: 'operator' } }) }));
 jest.mock('../utilities/commandLifecycleFeedback', () => ({ submitCommandWithLifecycleFeedback: jest.fn(), trackCommandReceipt: jest.fn() }));
 const mockMonitors = [];
 jest.mock('../contexts/CommandActivityContext', () => ({ useCommandActivity: () => ({ commandLifecycleCallbacks: {}, commandMonitors: mockMonitors }) }));
 jest.mock('./SequentialReturnControl', () => ({ targetIds, compact }) => <button>Return {compact ? targetIds.join(',') : 'legacy'}</button>);
 const decisions = Object.fromEntries(['1', '2'].map((id) => [id, { hw_id: id, status: 'ready', message: 'Ready', valid_for_ms: 10000 }]));
+const takeoffReadiness = { valid_for_ms: 10000, targets: ['1', '2'].map((hw_id) => ({ hw_id, status: 'ready', coordinated_takeoff_supported: true })) };
+const chooseRecipients = ids => {
+  fireEvent.click(screen.getByRole('button',{name:'Choose command aircraft'}));
+  const picker=within(screen.getByRole('dialog',{name:'Command aircraft'}));
+  fireEvent.click(picker.getByRole('button',{name:'Clear command aircraft'}));
+  ids.forEach(id => fireEvent.click(picker.getByRole('checkbox',{name:`Include Drone ${id} (H${id})`})));
+  fireEvent.click(picker.getByRole('button',{name:`Use ${ids.length} aircraft`}));
+};
 const preview = { runtime_mode: 'SITL', revision: 'revision', start_admissions: decisions, clusters: [{ cluster_id: '1', members: [
   { hw_id: '1', follow: '0', available: true, armed: false, frame: 'ned' },
   { hw_id: '2', follow: '1', available: true, armed: false, frame: 'ned', offset_x: 6 },
@@ -16,16 +25,17 @@ const preview = { runtime_mode: 'SITL', revision: 'revision', start_admissions: 
 beforeEach(() => {
   jest.clearAllMocks(); sessionStorage.clear();
   mockMonitors.length = 0;
-  fetchGcsResource.mockResolvedValue({ data: preview });
+  fetchGcsResource.mockImplementation((path) => Promise.resolve({ data: path.startsWith('/api/v1/commands/takeoff-readiness') ? takeoffReadiness : preview }));
   submitCommandWithLifecycleFeedback.mockResolvedValue({ command_id: 'test' });
 });
-async function mounted() {
+async function mounted(count = 2) {
   const result = render(<SwarmOperations />);
-  await waitFor(() => expect(screen.getByRole('combobox', { name: 'Swarm formation' })).toHaveValue('1'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Choose command aircraft' })).toHaveAttribute('data-recipient-count',String(count)));
   return result;
 }
 test('default actions use the whole cluster and Start sends only after confirmation', async () => {
   await mounted();
+  expect(screen.queryByRole('combobox', { name: 'Swarm formation' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Return 1,2' })).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Start Swarm' }));
   const dialog = screen.getByRole('dialog');
@@ -42,7 +52,8 @@ test('takeoff is separate, default 10 m and cancelled confirmation sends nothing
   fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /cancel/i }));
   expect(submitCommandWithLifecycleFeedback).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Takeoff' }));
-  fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Confirm Takeoff' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: /^Arm & take off/ })).toBeEnabled());
+  fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^Arm & take off/ }));
   await waitFor(() => expect(submitCommandWithLifecycleFeedback).toHaveBeenCalledWith(expect.objectContaining({ mission_type: 10, takeoff_altitude: 10, target_drone_ids: ['1', '2'] }), expect.anything()));
 });
 test('reviewed revision changes block dispatch', async () => {
@@ -68,6 +79,17 @@ test('finishing takeoff automatically enables confirmation but never sends Start
     expect(screen.getByRole('button', { name: 'Confirm Start Swarm' })).toBeEnabled();
     expect(submitCommandWithLifecycleFeedback).not.toHaveBeenCalled();
   } finally { jest.useRealTimers(); }
+});
+
+test('formation setup links are visible, scoped and never dispatch a command', async () => {
+  await mounted();
+  const source = screen.getByRole('group', { name: 'Formation starting point' });
+  expect(within(source).getByRole('link', { name: 'Plan formation' }))
+    .toHaveAttribute('href', '/swarm-design?tab=formation&drone=1');
+  expect(within(source).getByRole('link', { name: 'Capture positions' }))
+    .toHaveAttribute('href', '/swarm-design?tab=formation&capture=1&drone=1');
+  expect(screen.queryByRole('link', { name: 'Capture spacing' })).not.toBeInTheDocument();
+  expect(submitCommandWithLifecycleFeedback).not.toHaveBeenCalled();
 });
 
 test('stale or absent node evidence cannot enable Start', async () => {
@@ -154,20 +176,25 @@ test('disappeared explicit cluster does not silently become another cluster', as
     expect(screen.getByRole('button', { name: 'Start Swarm' })).toBeDisabled();
   } finally { jest.useRealTimers(); }
 });
-test('takeoff in mixed state explicitly targets only the grounded drone', async () => {
-  fetchGcsResource.mockResolvedValue({ data: { ...preview, clusters: [{ ...preview.clusters[0], members: [
+test('takeoff never silently removes the airborne member of a reviewed cluster', async () => {
+  const mixedPreview = { ...preview, clusters: [{ ...preview.clusters[0], members: [
     preview.clusters[0].members[0], { ...preview.clusters[0].members[1], armed: true, landed_state: 2, relative_altitude_m: -5 },
-  ] }] } });
+  ] }] };
+  fetchGcsResource.mockImplementation((path) => Promise.resolve({ data: path.startsWith('/api/v1/commands/takeoff-readiness')
+    ? { ...takeoffReadiness, targets: [takeoffReadiness.targets[0], { hw_id: '2', status: 'blocked', reason: 'Aircraft already airborne' }] }
+    : mixedPreview }));
   await mounted(); fireEvent.click(screen.getByRole('button', { name: 'Takeoff' }));
-  expect(within(screen.getByRole('dialog')).getByText('Drone 1')).toBeInTheDocument();
-  fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Confirm Takeoff' }));
-  await waitFor(() => expect(submitCommandWithLifecycleFeedback).toHaveBeenCalledWith(expect.objectContaining({ target_drone_ids: ['1'] }), expect.anything()));
+  expect(within(screen.getByRole('dialog')).getByText('Aircraft 1')).toBeInTheDocument();
+  expect(within(screen.getByRole('dialog')).getByText('Aircraft 2')).toBeInTheDocument();
+  await screen.findByText('Aircraft already airborne');
+  expect(screen.getByRole('button', { name: /^Arm & take off/ })).toBeDisabled();
+  expect(submitCommandWithLifecycleFeedback).not.toHaveBeenCalled();
 });
-test('single-drone recovery requires the explicit advanced selector', async () => {
+test('individual recovery uses To rather than a second legacy selector', async () => {
   await mounted();
   expect(screen.queryByRole('combobox', { name: 'Recovery targets' })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Other actions' }));
-  fireEvent.change(screen.getByRole('combobox', { name: 'Recovery targets' }), { target: { value: '2' } });
+  chooseRecipients(['2']);
   fireEvent.click(screen.getByRole('button', { name: 'Land here' }));
   expect(within(screen.getByRole('dialog')).getByText('Drone 2')).toBeInTheDocument();
 });
@@ -178,8 +205,8 @@ test('partial engagement is never labelled full following and Hold remains clust
   await mounted();
   expect(screen.getByText('Partial · 1/2 engaged')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Other actions' }));
-  fireEvent.change(screen.getByRole('combobox', { name: 'Recovery targets' }), { target: { value: '2' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Hold Swarm' }));
+  chooseRecipients(['2']);
+  fireEvent.click(screen.getByRole('button', { name: 'Hold all' }));
   await waitFor(() => expect(submitCommandWithLifecycleFeedback).toHaveBeenCalledWith(
     expect.objectContaining({ mission_type: 102, target_drone_ids: ['1', '2'] }), expect.anything()));
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -194,7 +221,7 @@ test('Hold is available without a remembered swarm session and bypasses a pendin
   fireEvent.click(screen.getByRole('button', { name: 'Confirm Start Swarm' }));
   await waitFor(() => expect(submitCommandWithLifecycleFeedback).toHaveBeenCalledTimes(1));
   fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Hold Swarm' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Hold all' }));
   await waitFor(() => expect(submitCommandWithLifecycleFeedback).toHaveBeenCalledTimes(2));
   expect(submitCommandWithLifecycleFeedback.mock.calls[1][0]).toEqual(expect.objectContaining({ mission_type: 102, target_drone_ids: ['1','2'] }));
   await act(async () => { finish({ command_id: 'late-start' }); });
@@ -209,7 +236,7 @@ test('Hold fences a delayed readiness reply before Start can be posted', async (
   fetchGcsResource.mockImplementationOnce(() => new Promise((resolve) => { finishReview = resolve; }));
   fireEvent.click(screen.getByRole('button', { name: 'Confirm Start Swarm' }));
   fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Hold Swarm' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Hold all' }));
   await waitFor(() => expect(submitCommandWithLifecycleFeedback).toHaveBeenCalledTimes(1));
   await act(async () => { finishReview({ data: preview }); });
   expect(submitCommandWithLifecycleFeedback).toHaveBeenCalledTimes(1);
@@ -219,11 +246,11 @@ test('Hold fences a delayed readiness reply before Start can be posted', async (
 test('an uncertain Hold retry reuses identity and does not claim Held from the receipt', async () => {
   await mounted();
   submitCommandWithLifecycleFeedback.mockRejectedValueOnce({ request: {} });
-  fireEvent.click(screen.getByRole('button', { name: 'Hold Swarm' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Hold all' }));
   await screen.findByRole('alert');
   const first = submitCommandWithLifecycleFeedback.mock.calls[0][0];
   expect(screen.getAllByText('Hold unconfirmed')).toHaveLength(2);
-  fireEvent.click(screen.getByRole('button', { name: 'Hold Swarm' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Hold all' }));
   await waitFor(() => expect(submitCommandWithLifecycleFeedback).toHaveBeenCalledTimes(2));
   expect(submitCommandWithLifecycleFeedback.mock.calls[1][0]).toEqual(first);
 });
@@ -236,17 +263,18 @@ test('a terminal swarm cannot keep displaying Following after recovery', async (
   expect(screen.getByRole('button', { name: 'Start Swarm' })).toBeEnabled();
 });
 
-test('navigation links are in the overflow, not repeated on the main surface', async () => {
+test('Globe stays in overflow and setup links are not duplicated there', async () => {
   await mounted();
   expect(screen.queryByRole('link', { name: 'Globe' })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Other actions' }));
   expect(screen.getByRole('link', { name: 'Globe' })).toBeInTheDocument();
-  expect(screen.getByRole('link', { name: 'Design Swarm' })).toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: 'Design Swarm' })).not.toBeInTheDocument();
+  expect(screen.getAllByRole('link', { name: 'Plan formation' })).toHaveLength(1);
 });
 
 test('a newer mission removes an old Hold receipt presentation', async () => {
   const { rerender } = await mounted();
-  fireEvent.click(screen.getByRole('button', { name: 'Hold Swarm' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Hold all' }));
   await waitFor(() => expect(submitCommandWithLifecycleFeedback).toHaveBeenCalled());
   expect(screen.getAllByText('Hold unconfirmed')).toHaveLength(2);
   mockMonitors.push({ commandId: 'later-start', missionType: 2, targetDrones: ['1', '2'],
@@ -260,12 +288,40 @@ test('native returning telemetry takes precedence over a Hold receipt', async ()
   jest.useFakeTimers();
   try {
     await mounted();
-    fireEvent.click(screen.getByRole('button', { name: 'Hold Swarm' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Hold all' }));
     await act(async () => {});
     fetchGcsResource.mockResolvedValue({ data: { ...preview, clusters: [{ ...preview.clusters[0], members:
       preview.clusters[0].members.map((m) => ({ ...m, armed: true, landed_state: 2, flight_mode: 0x05040000 })) }] } });
     await act(async () => { jest.advanceTimersByTime(3000); });
     expect(screen.queryByText('Hold unconfirmed')).not.toBeInTheDocument();
     expect(screen.getAllByText(/Returning/).length).toBeGreaterThan(0);
+  } finally { jest.useRealTimers(); }
+});
+
+test('failed preview keeps formation but does not present cached flight or preflight facts as current', async () => {
+  jest.useFakeTimers();
+  try {
+    const cached = { ...preview, clusters: [{ ...preview.clusters[0], members:
+      preview.clusters[0].members.map((m) => ({ ...m, landed_state: 1,
+        readiness_status: 'blocked', readiness_summary: 'Heading estimate unstable' })) }] };
+    fetchGcsResource.mockResolvedValue({ data: cached });
+    await mounted();
+    expect(screen.getAllByText(/Grounded/)).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Drone 1' }));
+    expect(screen.getAllByText(/Heading estimate unstable/).length).toBeGreaterThan(0);
+    fetchGcsResource.mockRejectedValue(new Error('Telemetry request timed out'));
+    await act(async () => { jest.advanceTimersByTime(2500); });
+    expect(screen.getByText('Telemetry delayed')).toBeInTheDocument();
+    expect(screen.getAllByText(/Unknown · Telemetry delayed/)).toHaveLength(2);
+    expect(screen.queryByText(/Grounded|Disarmed|Airborne/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Heading estimate unstable/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Choose command aircraft' })).toHaveAttribute('data-recipient-count','2');
+    expect(screen.getByRole('button', { name: 'Drone 2' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Hold all' })).toBeEnabled();
+    expect(cached.clusters[0].members.every((m) => m.available)).toBe(true);
+    fetchGcsResource.mockResolvedValue({ data: cached });
+    await act(async () => { jest.advanceTimersByTime(2500); });
+    expect(screen.getAllByText(/Grounded/)).toHaveLength(2);
+    expect(screen.getAllByText(/Heading estimate unstable/).length).toBeGreaterThan(0);
   } finally { jest.useRealTimers(); }
 });

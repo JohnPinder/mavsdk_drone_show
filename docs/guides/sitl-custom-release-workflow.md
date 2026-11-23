@@ -31,8 +31,20 @@ For public/private repo authentication, read [Custom SITL Auth Guide](custom-sit
 - Do not use `docker commit` as the normal release workflow.
 - Treat running containers as disposable runtime instances, not as the source of truth.
 - Commit changes to git first, then rebuild a clean image.
+- After dependency updates, prepare the PX4/Gazebo build-only targets before
+  flattening. Updated headers can invalidate an inherited cache; do not defer
+  parallel C++ compilation to each aircraft's first startup. Record the actual
+  prepared binary digest and verify fresh containers do not repeat that work.
+- Startup launches that prepared binary in PX4's foreground daemon mode (`-d`),
+  from its rootfs, using the installed airframe/world metadata. It does not run
+  `make` or the interactive PXH console in a detached log pipeline. Unsupported
+  targets or missing build assets fail explicitly instead of silently selecting
+  a different vehicle or compiling at aircraft startup.
 - Keep PX4 and the baked `mavsdk_server` pinned inside the image and update them only through a validated image rebuild.
 - Use runtime git sync only when you intentionally want mutable latest-on-boot behavior.
+- A source prerelease tag does not refresh the downloadable SITL image. Record
+  its unit/UI/SITL evidence separately; do not imply an older archive contains
+  the tagged runtime, or promote unvalidated mission capabilities to hardware.
 
 ## What Container Startup Actually Syncs
 
@@ -40,11 +52,15 @@ When `MDS_SITL_GIT_SYNC=true`:
 - the container fetches and hard-resets the `mavsdk_drone_show` repo to the configured branch
 - untracked MDS files are cleaned, while runtime artifacts such as `venv/`, `logs/`, and the baked `mavsdk_server` are preserved
 
-What it does **not** auto-update:
+What it does **not** refresh as a complete image:
 - PX4 source tree
 - PX4 build outputs
 - system packages
-- baked `mavsdk_server`
+- a supported interpreter/dependency/build-cache baseline
+
+The manifest-backed SDK provisioner can reconcile the native server when idle;
+that is not a substitute for a validated source/environment/server tuple or image
+rebuild. Explicit custom overrides remain unverified compatibility choices.
 
 That means runtime git sync is useful for development, but it is not a full image refresh and not a reproducible release process.
 For private GitHub repos, add `MDS_GIT_AUTH_TOKEN_FILE` or read-only `MDS_GIT_SSH_KEY_FILE` during mutable runtime sync or image preparation; plain HTTPS alone will not clone a private repo. Raw token environment variables are intentionally not supported.
@@ -96,6 +112,15 @@ Recommended rules:
 
 When your fork or customer-specific branch is approved, build a clean image from git:
 
+On a shared host, optionally set `MDS_SITL_BUILD_MEMORY`,
+`MDS_SITL_BUILD_MEMORY_SWAP`, `MDS_SITL_BUILD_CPUS` and
+`MDS_SITL_BUILD_PIDS_LIMIT` before building. They use Docker's normal units and
+apply to the single preparation container, independently of
+`MDS_SITL_DOCKER_*` runtime limits. Equal memory/swap limits disable container
+swap. Unset settings preserve Docker defaults; choose a budget leaving host/GCS
+headroom. Build and validation evidence must live on persistent storage if a
+reboot may be needed.
+
 ```bash
 export MDS_REPO_URL="https://github.com/YOURORG/YOURREPO.git"
 export MDS_BRANCH="your-release-branch"
@@ -114,6 +139,35 @@ Notes:
 - export `MDS_SITL_KEEP_ARM_TOOLCHAIN=true` before building only if your custom image intentionally needs the PX4 ARM toolchain
 - for private repos, prefer authenticated HTTPS via `MDS_GIT_AUTH_TOKEN_FILE`; read-only SSH via `MDS_GIT_SSH_KEY_FILE` is also supported
 - the helper validates repo/branch/auth before starting image preparation unless `MDS_SKIP_GIT_ACCESS_PREFLIGHT=true`
+
+### Python and security refresh boundary
+
+The supported Python minors and SDK pair are declared in
+`config/mavsdk-runtime.json`. An older Ubuntu image can retain its system
+Python 3.10: image preparation provisions the SHA-256-pinned official CPython
+source release from `config/python-runtime.json` under its versioned
+`/opt/mds-python/` prefix when no supported interpreter exists. It does not
+replace `/usr/bin/python3`, add a PPA, upgrade the Ubuntu release or modify PX4,
+Gazebo, firmware parameters or control gains. The venv, its health check and
+requirements marker use the selected venv interpreter, not the system minor.
+Startup never compiles Python; an old image without an eligible interpreter
+requires a rebuild. Source provisioning remains subject to the normal final
+image build and runtime validation gates.
+
+The build records Python/SDK manifests, interpreter version, SDK binary hash
+and compatibility evidence. PX4 provenance records the full checkout commit,
+binary SHA-256 and actual gitlink/submodule evidence. An empty submodule status
+file is **not** verified provenance: a base checkout without gitlinks is marked
+`unavailable_no_gitlinks`. Preserve that limitation in the release manifest.
+
+For a dependency security refresh, install the whole requirements set into an
+isolated environment and run both `python -m pip check` and a current
+`python -m pip_audit --format json`. Audit the resolved installed graph, not just
+exact requirements lines; preserve the report and date. Repeat against the
+final image venv after building. Python advisory results do not establish OS,
+PX4, native-library or real-hardware security clearance. Credential gates run
+after build-secret cleanup and before flattening; see
+[Custom SITL Auth](custom-sitl-auth.md#image-prep-read-access).
 
 ## Rebuild And Package A Validated Release
 
@@ -219,10 +273,16 @@ The repo now includes a helper for the publish step:
 ```bash
 bash tools/publish_sitl_release_to_mega.sh \
   --artifact-dir /path/to/release-dir \
-  --mega-target /Root/mavsdk-drone-show-sitl \
-  --replace-existing \
+  --mega-target /Root/mavsdk-drone-show-sitl/releases/YOUR_VERSION \
   --json
 ```
+
+Stage a new versioned folder first. Download that uploaded archive again,
+verify its SHA-256 and `7z t`, then load/inspect the exact image before updating
+the public link or retiring the old distribution. Keep the accepted archive
+available throughout verification. `--replace-existing` removes matching
+remote files **before** upload; it is not a transactional release promotion and
+must not be used on the only accepted copy.
 
 Recommended auth order:
 
@@ -241,6 +301,28 @@ If you maintain your own customer distribution, document:
 - whether older archives are retained or replaced
 
 ## Recommended Maintenance Policy
+
+### Isolated validation beside a REAL GCS
+
+Use a separate checkout, API port, log/state directories and owned runtime env
+file. Set both the process `MDS_MODE=sitl` and the management configuration path
+`MDS_GCS_SYSTEM_CONFIG` to that owned env file. Confirm `mode=sitl`,
+`configured_mode=sitl` and `restart_required=false` through runtime-status before
+any validator dispatches a simulated command. Do not point a lab at the real
+host's configuration file or bypass the validator's mode guard.
+
+Verify container-to-GCS callbacks as well as host-to-container HTTP: one direction
+working does not prove that heartbeats/origin retrieval can return through a host
+firewall. If needed, add only a temporary bridge/source/destination/port-scoped
+rule and remove that exact rule after the owned lab stops.
+
+An explicitly recorded current-source overlay can diagnose source changes when
+rebuild headroom is unavailable. Record the base image, source commit and any
+temporary dependency additions. This is **not** a rebuilt/pinned distribution
+image or release-provenance validation. Never publish it using `docker commit`;
+rebuild/package/checksum through the documented release path when space permits.
+
+### Shared releases and custom forks
 
 For official shared releases:
 - validate on the release image first

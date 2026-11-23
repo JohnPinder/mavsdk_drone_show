@@ -17,6 +17,7 @@ Welcome to the MDS documentation. This index routes operators, maintainers, and 
 | understand the main dashboard and dispatch scope | [Dashboard Operator Guide](guides/dashboard-operator.md) |
 | fly a Drone Show from the dashboard | [Drone Show Guide](features/drone-show.md) |
 | run Smart Swarm from the dashboard | [Smart Swarm Guide](features/smart-swarm.md) |
+| capture spacing and operate a live formation step by step | [Smart Swarm Operator Workflow](guides/smart-swarm-field-workflow.md) |
 | inspect Smart Swarm tracking quality | [Smart Swarm Tracking Analysis](guides/smart-swarm-tracking-analysis.md) |
 | package runtime proof reports | [Runtime Evidence Reporting](guides/runtime-evidence-reporting.md) |
 | plan QuickScout or Swarm Trajectory missions | [Mission Planning Workspace](features/mission-planning-workspace.md) |
@@ -34,6 +35,7 @@ Welcome to the MDS documentation. This index routes operators, maintainers, and 
 | control local SITL containers from the dashboard | [SITL Control Guide](guides/sitl-control.md) |
 | configure Mapbox-backed map views | [Mapbox Setup](guides/mapbox-setup.md) |
 | inspect logs | [Logging System Guide](guides/logging-system.md) |
+| validate communication ownership and recovery | [Connectivity Runtime](guides/connectivity-runtime.md#shared-observations-and-transport-recovery) |
 | use the Simurgh operator assistant or MCP layer | [Simurgh Operator](guides/simurgh-operator.md) |
 | connect n8n, Claude, VS Code, or custom agents through MCP | [Simurgh MCP Client Recipes](guides/simurgh-mcp-clients.md) |
 
@@ -63,6 +65,7 @@ Welcome to the MDS documentation. This index routes operators, maintainers, and 
 - **[Frontend UI Audit Guide](guides/frontend-ui-audit.md)** - predeploy UI/UX cleanup guardrails, route-doc mapping rules, and audit command
 - **[GCS Auth Guide](guides/gcs-auth.md)** - optional dashboard login, roles, token management, bootstrap flags, and SSH recovery
 - **[SITL Validation Platform](guides/sitl-validation-platform.md)** - canonical reusable runtime-acceptance suite for maintainers, CI, and AI agents across same-host and split-root validation layouts
+- **[SDK 4 Image Acceptance](plans/2026-11-12-sdk4-image-release-acceptance.md)** - exact baked runtime, native two/three-aircraft matrix, verified archive and separate grounded-maintenance boundary
 - **[Smart Swarm Tracking Analysis](guides/smart-swarm-tracking-analysis.md)** - expected vs actual follower tracking proof for leader jogs and frame changes
 - **[Two-drone Smart Swarm Pre-field Acceptance](plans/2026-08-13-two-drone-sitl-pre-field-acceptance-checkpoint.md)** - exact H1/H2 `+6 m north` SITL rehearsal, tracking evidence, log audit, cleanup proof, and real-flight boundary
 - **[Runtime Evidence Reporting](guides/runtime-evidence-reporting.md)** - generic Markdown/HTML/PDF package generation for accepted validation runs without customer-specific leakage
@@ -75,6 +78,7 @@ Welcome to the MDS documentation. This index routes operators, maintainers, and 
 - **[MDS vNext Architecture Consultation](plans/2026-07-28-mds-next-major-architecture-consultation.md)** - data ownership, migration boundaries, rollout phases, and architecture decisions for the next major version
 - **[MDS vNext Plain-Language and Private-Drift Review](plans/2026-07-28-mds-vnext-plain-language-and-private-drift-review.md)** - beginner-friendly lifecycle examples, official/private drift analysis, and operator workflows
 - **[MDS vNext Connectivity, Recovery, and Operations Review](plans/2026-07-28-mds-vnext-connectivity-recovery-and-operations-review.md)** - NetBird/Tailscale/LAN connectivity, MAVLink Anywhere, Smart WiFi, GCS loss, recovery, and scale scenarios
+- **[Communications Modernization Plan](plans/2026-11-15-communications-modernization.md)** - proposed shared observations, bounded WS/HTTP recovery, preserved command/motion lanes and measured migration gates; not deployed behavior
 - **[Field Launch Readiness Incident Checkpoint](plans/2026-08-02-field-launch-readiness-incident.md)** - sanitized field timeline, safety boundary, proven launch/readiness/control-plane defects, reconnect evidence plan, and systematic cross-repo fix boundary
 - **[Field Launch Readiness Release Gate](plans/2026-08-03-field-launch-readiness-release-gate.md)** - finite P0 closure bar, one-pass validation sequence, explicit deferrals, and promotion/field-test boundary
 - **[Simurgh Read-Only Checkpoint](guides/simurgh-readonly-checkpoint.md)** - historical checkpoint retained for project history; not indexed as live agent context
@@ -128,6 +132,7 @@ Welcome to the MDS documentation. This index routes operators, maintainers, and 
 | **[Repo Asset Layout](guides/repo-asset-layout.md)** | Authoritative home for live config, repo-backed presets, runtime state, and generated mission artifacts |
 | **[CSV Migration Guide](guides/csv-migration.md)** | Legacy: migrating from old CSV format |
 | **[Python Compatibility](guides/python-compatibility.md)** | Python version requirements (3.11-3.13) |
+| **[MAVSDK Updates](guides/mavsdk-updates.md)** | Paired client/server manifest, grounded maintenance, validation and rollback |
 
 ---
 
@@ -141,9 +146,9 @@ Detailed documentation for MDS features:
 | **[Smart Swarm](features/smart-swarm.md)** | Live leader-follower formations, runtime controls, failover behavior, first SITL flow, and validator tool |
 | **[Smart Swarm Tracking Analysis](guides/smart-swarm-tracking-analysis.md)** | Capture expected vs actual follower tracking during leader jogs and frame changes |
 | **[Mission Planning Workspace](features/mission-planning-workspace.md)** | Shared QuickScout and Swarm Trajectory planning UI doctrine, altitude/terrain behavior, degraded-state handling, and job/progress policy |
-| **[Swarm Trajectory](features/swarm-trajectory.md)** | Single-page leader-route authoring, validation, preview, processing, commit/transfer, and Dashboard Mission Type 4 workflow for leader/follower trajectories |
+| **[Swarm Trajectory](features/swarm-trajectory.md)** | Leader-route authoring, validation, preview, processing, commit/transfer, and launch/monitoring from its own Operate tab |
 | **[QuickScout](quickscout.md)** | SAR/recon point dispatch, last-known point, polygon area search, multi-vertex corridor planning, launch review, and monitoring |
-| **[Logging System](guides/logging-system.md)** | Unified logging, Log Viewer workflow, export, and operator/developer modes |
+| **[Logging System](guides/logging-system.md)** | Live, Sessions and Flight logs; [illustrated operator workflow](guides/logs-operator-workflow.md), export and maintenance |
 | **[Origin System](features/origin-system.md)** | Coordinate system implementation and global positioning |
 | **[Control Modes and Coordinates](control-modes-and-coordinates.md)** | Comprehensive guide to control modes, coordinate systems, Phase 2 auto-correction, and time synchronization |
 
@@ -250,7 +255,7 @@ sudo ./tools/mds_gcs_init.sh
 - **MAVLink2REST** - REST API for MAVLink messages
   - [Official Documentation](https://github.com/mavlink/mavlink2rest)
 - **WebSocket** - Real-time telemetry streaming
-  - Protocol documentation: *(TBD)*
+  - [GCS stream contracts](apis/gcs-api-server.md#websocket-endpoints) and [aircraft stream contracts](apis/drone-api-server.md#websocket-endpoint-real-time-streaming)
 
 ### Integration Examples
 

@@ -2,6 +2,7 @@ import argparse
 import time
 
 import pytest
+from tools import validate_actions_runtime as validator
 
 from tools.validate_actions_runtime import (
     _is_safe_interrupted_terminal_status,
@@ -72,6 +73,24 @@ def test_resolve_selected_ids_falls_back_to_csv_argument_and_default():
     assert resolve_selected_ids(default_args) == [1, 2, 3]
 
 
+def test_launch_probe_timeout_preserves_native_blocker_without_accepting_it(monkeypatch):
+    class Client:
+        def get_telemetry(self):
+            return {"1": {"ip": "127.0.0.1"}}
+
+        def probe_live_armability(self, ip, **kwargs):
+            return {"success": True, "ready": False, "summary": "waiting for health stream",
+                    "blockers": ["health stream"]}
+
+    def expire(predicate, **kwargs):
+        assert predicate() is False
+        raise RuntimeError("Timed out")
+
+    monkeypatch.setattr(validator, "wait_for", expire)
+    with pytest.raises(RuntimeError, match='Last native probes:.*health stream'):
+        validator.wait_for_live_launch_readiness(Client(), [1], timeout=1)
+
+
 @pytest.mark.parametrize(
     ("status", "outcome", "expected"),
     [
@@ -93,3 +112,24 @@ def test_interrupted_terminal_status_prefers_explicit_outcome(
     if outcome is not None:
         payload["outcome"] = outcome
     assert _is_safe_interrupted_terminal_status(payload) is expected
+
+
+@pytest.mark.parametrize("state", sorted(validator.TERMINAL_STATUSES))
+def test_phase_wait_fails_immediately_on_terminal_receipt(monkeypatch, state):
+    class Client:
+        def get_json(self, _path):
+            return {"status": state, "phase": "terminal", "error_summary": "native ground check",
+                    "preparations": {"blocked": 1}}
+
+    monkeypatch.setattr(validator.time, "sleep", lambda _: pytest.fail("Terminal receipt must not poll"))
+    with pytest.raises(RuntimeError, match="ended before phase=in_progress.*native ground check"):
+        validator.wait_for_command(Client(), "receipt-1", desired_phase="in_progress")
+
+
+def test_terminal_wait_and_matching_phase_still_return_receipt():
+    class Client:
+        def get_json(self, _path):
+            return {"status": "failed", "phase": "terminal"}
+
+    assert validator.wait_for_command(Client(), "receipt-1", terminal=True)["status"] == "failed"
+    assert validator.wait_for_command(Client(), "receipt-1", desired_phase="terminal")["status"] == "failed"

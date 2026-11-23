@@ -1,9 +1,12 @@
-import React, { lazy, Suspense, useMemo, useState } from 'react';
+import React, { lazy, Suspense, useMemo, useRef, useState } from 'react';
+import { FaHistory } from 'react-icons/fa';
 import SwarmFormationCanvas from './SwarmFormationCanvas';
 import DroneGraph from './DroneGraph';
 import FormationNumberInput from './FormationNumberInput';
 import InfoHint from './InfoHint';
-import { aircraftIdentity, buildAircraftLabels } from '../utilities/swarmDesignPresentation';
+import SwarmFormationSource from './SwarmFormationSource';
+import { ActionIconButton } from './ui/OperatorPrimitives';
+import { aircraftIdentity, buildAircraftLabels, formationReferenceLabel } from '../utilities/swarmDesignPresentation';
 import { buildSwarmViewModel } from '../utilities/swarmDesignUtils';
 import { resolveFormationPositions } from '../utilities/swarmFormationGeometry';
 import '../styles/SwarmDesignWorkspace.css';
@@ -33,8 +36,10 @@ function ClusterThumbnail({ members, headings, labels }) {
 export default function SwarmDesignWorkspace({ assignments, configData, selectedId, onSelect,
   onChange, onEditBegin, onEditEnd, onUndo, onRedo, canUndo, canRedo,
   onReset, canReset = false,
+  onCapture, captureDisabled = false,
   previewHeadings = EMPTY_HEADINGS, onHeadingChange, disabled = false }) {
   const model = useMemo(() => buildSwarmViewModel(assignments, configData), [assignments, configData]);
+  const editorRef = useRef(null);
   const [view, setView] = useState('top');
   const [layout, setLayout] = useState('quad');
   const [linkedViews, setLinkedViews] = useState(true);
@@ -46,6 +51,7 @@ export default function SwarmDesignWorkspace({ assignments, configData, selected
   const [search, setSearch] = useState('');
   const selected = model.dronesById[String(selectedId)];
   const cluster = model.clusters.find((item) => item.id === scope)
+    || model.clusters.find((item) => item.id === selected?.clusterRootId)
     || model.clusters.find((item) => item.type === 'cluster');
   const select = (id) => {
     onSelect(id);
@@ -88,7 +94,12 @@ export default function SwarmDesignWorkspace({ assignments, configData, selected
     if (next === 'quad') setVisitedViews((previous) => new Set([...previous, 'top', 'front', 'side', '3d']));
     if (view === 'links') setView('top');
   };
-  return <div className="formation-workspace">
+  return <>
+    <SwarmFormationSource onPlan={() => editorRef.current?.focus()}
+      onCapture={() => onCapture?.(scope === 'all' ? null : cluster?.id)}
+      disabled={disabled || !assignments.length}
+      captureDisabled={!onCapture || captureDisabled || !model.clusters.some(item => item.drones.length > 1)} />
+    <div className="formation-workspace">
     <nav className="formation-roster" aria-label="Formation aircraft">
       <label className="formation-search">
         <input type="search" aria-label="Find aircraft" placeholder="Find aircraft" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
@@ -97,23 +108,26 @@ export default function SwarmDesignWorkspace({ assignments, configData, selected
         <button className="formation-cluster-label" type="button" aria-pressed={scope !== 'all' && cluster?.id === group.id} onClick={() => setScope(group.id)}>{group.title}</button>
         {group.drones.filter((drone) => `${label(drone)} ${drone.hw_id}`.toLowerCase().includes(search.toLowerCase())).map((drone) =>
           <button className="formation-aircraft" type="button" key={drone.hw_id} aria-pressed={String(selectedId) === String(drone.hw_id)} onClick={() => select(drone.hw_id)}>
-            <span className="formation-role" aria-label={drone.follow === '0' ? 'Leader' : 'Follower'}>{drone.follow === '0' ? '◆' : '↳'}</span>
-            <span>{label(drone)}</span><small>{aircraftIdentity(identityRows.find((item) => String(item.hw_id) === String(drone.hw_id)) || drone)} · {drone.follow === '0' ? 'Leader' : `→ ${label(model.dronesById[drone.follow] || { hw_id: drone.follow })}`}</small>
+            <span className="formation-role" aria-label={drone.follow === '0' ? 'Leader' : drone.role === 'relayLeader' ? 'Relay' : 'Follower'}>{drone.follow === '0' ? '◆' : '↳'}</span>
+            <span>{label(drone)}</span><small>{aircraftIdentity(identityRows.find((item) => String(item.hw_id) === String(drone.hw_id)) || drone)} · {drone.follow === '0' ? 'Leader' : `${drone.role === 'relayLeader' ? 'Relay ' : ''}→ ${label(model.dronesById[drone.follow] || { hw_id: drone.follow })}`}</small>
           </button>)}
       </section>)}
     </nav>
-    <section className="formation-stage" aria-label="Formation editor">
+    <section ref={editorRef} tabIndex={-1} className="formation-stage" aria-label="Formation editor">
       <div className="formation-tools">
         <div role="tablist" aria-label="Formation view">{views.map(([id, text]) =>
           <button type="button" role="tab" key={id} aria-selected={layout === 'single' && view === id} onClick={() => chooseView(id)}>{text}</button>)}</div>
-        <div><button type="button" aria-label="Undo formation edit" disabled={!canUndo || disabled} onClick={onUndo}>↶ Undo</button>
+        <div className="formation-history" role="group" aria-label="Draft history"><button type="button" aria-label="Undo formation edit" disabled={!canUndo || disabled} onClick={onUndo}>↶ Undo</button>
           <button type="button" aria-label="Redo formation edit" disabled={!canRedo || disabled} onClick={onRedo}>↷ Redo</button>
-          <button type="button" disabled={!canReset || disabled} onClick={onReset}>Reset draft</button></div>
+          <ActionIconButton label="Revert to saved plan" icon={<FaHistory />} className="formation-revert"
+            disabled={!canReset || disabled || !onReset} onClick={onReset}
+            title="Revert all draft edits to the saved plan. Confirmation and Undo are available.">Revert</ActionIconButton>
+        </div>
       </div>
       <div className="formation-display-tools">
         <div role="group" aria-label="Editor layout"><button type="button" aria-pressed={layout === 'single'} onClick={() => changeLayout('single')}>Single</button>
           <button type="button" aria-pressed={layout === 'quad'} onClick={() => changeLayout('quad')}>Four views</button></div>
-        <span className="formation-axis-reference">{viewFrame === 'body' ? `Body · ${names[headingId] || `H${headingId}`} · ${viewHeading}°` : 'NED · North / East / Up'}</span>
+        <span className="formation-axis-reference">{viewFrame === 'body' ? `${formationReferenceLabel(viewFrame)} · ${names[headingId] || `H${headingId}`} · ${viewHeading}°` : 'Geographic · North / East / Up'}</span>
         <div className="formation-viewport-tools" role="group" aria-label="View controls">
           <button type="button" onClick={() => emitViewportCommand('fit')}>Fit all</button>
           <button type="button" disabled={!selectedId} onClick={() => emitViewportCommand('focus')}>Focus all</button>
@@ -139,14 +153,14 @@ export default function SwarmDesignWorkspace({ assignments, configData, selected
     </section>
     <aside className="formation-inspector" aria-label="Aircraft spacing">
       {selected && draft ? <>
-        <header><strong>{label(selected)}</strong><span className="formation-identity-with-help">{aircraftIdentity(selectedIdentity || selected)}<InfoHint content="Hardware ID identifies the physical aircraft. Position ID identifies its mission slot." label="Aircraft identity help" placement="bottom" /></span><span>{draft.follow === '0' ? 'Leader' : 'Follower'}</span></header>
+        <header><strong>{label(selected)}</strong><span className="formation-identity-with-help">{aircraftIdentity(selectedIdentity || selected)}<InfoHint content="Hardware ID identifies the physical aircraft. Position ID identifies its mission slot." label="Aircraft identity help" placement="bottom" /></span><span>{draft.follow === '0' ? 'Leader' : selected.role === 'relayLeader' ? 'Relay' : 'Follower'}</span></header>
         <fieldset disabled={disabled}>
           <label>Follows<select value={draft.follow} onChange={(event) => onChange(selectedId, { follow: event.target.value })}>
             <option value="0">Independent leader</option>{parentCandidates.map((item) => <option value={item.hw_id} key={item.hw_id}>{label(item)}</option>)}</select></label>
           {draft.follow !== '0' && <>
-            <div className="formation-field-title"><label htmlFor="formation-reference">Reference</label><InfoHint icon="?" hoverable placement="left" label="About coordinate frames" content="NED keeps North/East spacing as the leader turns. Body rotates Forward/Right spacing with the followed aircraft. In MDS, Above is positive in both frames." /></div>
+            <div className="formation-field-title"><label htmlFor="formation-reference">Reference</label><InfoHint icon="?" hoverable placement="left" label="About coordinate frames" content="Geographic (NED) keeps North/East spacing as the leader turns. Leader-relative (Body) rotates Forward/Right spacing with the followed aircraft. Above is positive in both references." /></div>
             <select id="formation-reference" value={draft.frame} onChange={(event) => onChange(selectedId, { frame: event.target.value })}>
-              <option value="ned">NED · North/East</option><option value="body">Body · Forward/Right</option></select>
+              <option value="ned">Geographic · North/East</option><option value="body">Leader-relative · Forward/Right</option></select>
             {['offset_x', 'offset_y', 'offset_z'].map((key, index) => <label key={key}>
               {(draft.frame === 'body' ? ['Forward', 'Right', 'Above'] : ['North', 'East', 'Above'])[index]}
               <span className="formation-unit-input"><FormationNumberInput aria-label={`${key} metres`} value={draft[key]} onChange={(event) => onChange(selectedId, { [key]: event.target.value })} /><span>m</span></span>
@@ -154,9 +168,9 @@ export default function SwarmDesignWorkspace({ assignments, configData, selected
           </>}
         </fieldset>
         <div className="formation-heading"><div className="formation-field-title"><label htmlFor="formation-preview-heading">Preview heading</label><InfoHint icon="?" hoverable placement="left" label="About preview heading" content={`Design-only heading of ${names[headingId] || `H${headingId}`}: 0° North, 90° East. It rotates Body-frame previews, never commands yaw or aircraft movement.`} /></div>
-          <span className="formation-unit-input"><input id="formation-preview-heading" type="number" step="5" min="0" max="359" disabled={disabled} value={previewHeadings[headingId] || 0} onChange={(event) => onHeadingChange(headingId, Number(event.target.value))} /><span>°</span></span></div>
+          <span className="formation-unit-input"><FormationNumberInput id="formation-preview-heading" min="0" max="359.999" disabled={disabled} value={previewHeadings[headingId] || 0} onChange={(event) => onHeadingChange(headingId, Number(event.target.value))} /><span>°</span></span></div>
         {selected.warnings?.map((warning) => <p className="formation-issue" role="status" key={warning.code}>{warning.message}</p>)}
       </> : <p>Select an aircraft</p>}
     </aside>
-  </div>;
+  </div></>;
 }

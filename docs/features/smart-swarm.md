@@ -1,10 +1,17 @@
 # Smart Swarm Guide
 
 **Mission Type:** `2` (`SMART_SWARM`)  
-**Primary UI Surface:** `Swarm Design` page  
+**Primary UI Surface:** `Smart Swarm` (`/swarm-design`), with `Operate` / `Design Swarm` tabs
 **Runtime Model:** live leader-follower formation with saved follow chains and in-flight reassignment
 
 ## Overview
+
+Design and Operate expose a compact graphical **Formation** strip: **Plan formation**
+opens the editable saved layout or existing draft; **Capture positions** previews
+settled aircraft spacing. These setup workflows share one draft and never silently
+reset it. **Revert** is a separate history action. Neither workflow selects a live
+flight mode, pulls a repository, applies changes or launches aircraft. Apply and Start remain explicit.
+Optional browser recovery lives under **Unsaved draft**, not a blocking banner.
 
 Smart Swarm is the live, cooperative formation mode in MDS. Each drone uses a saved swarm assignment file:
 
@@ -46,11 +53,11 @@ For a clean first Smart Swarm demo in SITL:
    ```bash
    bash app/linux_dashboard_start.sh --sitl
    ```
-3. open `Overview` and wait until the target drones show `READY` with live telemetry
-4. open `Swarm Design` and verify the saved SITL assignments from `swarm_sitl.json`
-5. use `Design Swarm` Top, Side, 3D and Links views to preview the intended cluster
-6. use `Smart Swarm Runtime` to review `Formation Preview` and the live readiness snapshot for either the selected drone or selected cluster
-7. start Smart Swarm for the intended scope
+3. open `Overview` to inspect aircraft identity, live telemetry and any conditions needing attention
+4. open `Smart Swarm` → `Design Swarm` and verify the saved SITL assignments from `swarm_sitl.json`
+5. use Top, Side, 3D and Links views to preview the intended cluster
+6. open `Operate`, select the saved cluster and review its aircraft; use **Takeoff** if needed, then wait for the aircraft to be airborne and settled
+7. choose **Start Swarm**, review the exact formation scope and native readiness, then confirm; **Managed Return** uses the same **To** selection when needed
 8. if you want the full branch acceptance run from the command line, use:
    ```bash
    python3 tools/validate_smart_swarm_runtime.py
@@ -66,6 +73,21 @@ Validator note:
 
 ## Operator Model
 
+Operator controls say **Geographic** for `ned` and **Leader-relative** for `body`.
+The stored/API values and coordinate math are unchanged. NED and Body remain the
+technical terms in help, logs and configuration documentation.
+
+For illustrated field steps, including capture, takeoff, following, Hold and
+return, use the [Smart Swarm operator workflow](../guides/smart-swarm-field-workflow.md).
+
+![NED and Body spacing, and staggered native RTL](../assets/smart-swarm/frames-and-return.svg)
+
+The diagram is conceptual, not live telemetry. NED horizontal spacing stays
+earth-fixed; Body spacing follows the parent's heading. Managed Return staggers
+native RTL submissions; it does not separate return paths. Changing leaders is
+not a continuous motion handover: review roles while stopped for the normal
+operator workflow. Continuous moving handover remains outside the accepted scope.
+
 ### Design Swarm workflow
 
 The **Design Swarm** tab is one linked formation workspace. Top, Front, Side, 3D,
@@ -74,6 +96,30 @@ Links shows the leader/follower relationship, not geographic spacing. Body-frame
 geometry uses an explicit design-preview heading; live telemetry never moves a
 draft underneath the operator. Independent clusters are shown separately and
 do not imply saved spacing between their leaders.
+
+**Capture positions** opens the only cluster automatically, or preserves the selected cluster
+when several exist. Its read-only preview opens in interactive orthographic 3D,
+with Top/Front/Side switches, multirotor silhouettes and a leader star. It uses
+the shared formation-coordinate model; its small vector renderer does not need
+WebGL. Mouse/touch orbit, pan and zoom only change the camera. Solid positions
+are the frozen capture and ghost positions are live
+estimates from the existing GCS fleet cache. Viewing adds no aircraft RPC polling;
+native two-sample validation remains exclusive to explicit capture/Refresh.
+Delayed or nonadvancing samples are marked, including during successful but
+frozen HTTP responses. Live data cannot edit an assignment or satisfy capture
+authority. Changing cluster cancels/ignores the old capture request.
+
+Height defaults come from both native capture epochs: a whole grounded cluster
+selects Same height; a fully airborne settled cluster with valid Current capability
+selects Current. Mixed/inconsistent evidence or unstable airborne height recommends
+nothing; the operator must explicitly choose an available option. Explicit choices
+survive Refresh; otherwise a new capture updates the recommendation. Same height
+zeroes relative heights; Current copies estimated common-MSL differences. This
+does not calibrate independent altitude estimates. Leader/reference settings are
+collapsed under Adjust formation and never implicitly changed.
+Current's availability and reason come from the backend's frozen observations,
+not separate UI thresholds. A captured draft still requires inactive, revision-aware
+Apply; other clusters and existing in-flight edit behavior remain unchanged.
 
 The normal operator path is:
 
@@ -85,13 +131,13 @@ The normal operator path is:
 
 Edits are kept in a browser-local draft until explicitly applied. **Apply plan**
 writes the validated formation to the GCS; running Smart Swarm nodes may observe
-that revision through their normal configuration polling. **Save to repo** applies
+that revision through the configuration watch with HTTP reconciliation. **Save to repo** applies
 a changed draft first, then commits/pushes that exact revision when repository
 write access is available. An already-applied plan is published without reapplying.
 Repository failure does not undo a successful Apply; retry saves to the repo only.
 These outcomes are separate from aircraft synchronization; the page reports
-each outcome independently. Import, export and revert remain available under
-the Files menu. **Reset draft** restores the last loaded/applied GCS plan locally
+each outcome independently. Import and export remain under the Files menu.
+The separate **Revert** icon restores the last loaded/applied GCS plan locally after confirmation
 and is undoable; **Undo** reverses the last complete edit or drag.
 
 **Four views** is the default and shows Top, Front, Side and 3D together; a panel
@@ -101,8 +147,10 @@ All views use the selected aircraft's reference: North/East for NED, or the
 followed aircraft's Forward/Right axes at its explicit preview heading for Body.
 Top changes both horizontal axes; Front changes East/Right and Up; Side changes
 North/Forward and Up. Viewing orientation never changes saved offsets.
-The 3D move tool
-offers constrained Horizontal, East/Up and North/Up planes. Roots are fixed local
+The 3D move tool starts with **All directions**, so a selected follower has
+horizontal and Up handles. **Move** also offers optional horizontal and vertical
+plane restrictions. Height edits update **Above** in the same undoable draft;
+no flight command is sent. Roots are fixed local
 origins, not geographic destinations. A changed relay moves its dependent branch;
 children retain their relative offsets. Frame changes and reparenting within one
 cluster preserve preview positions. Joining independent clusters requires a separate
@@ -115,6 +163,16 @@ hardware and position IDs, and **Show IDs** adds them to plot labels.
 
 ### Operate display
 
+**Telemetry delayed** means the current aircraft sample is unavailable or the
+preview fetch failed, not proof the aircraft is powered off. Cached formation
+membership remains visible, but stale telemetry cannot claim current airborne,
+grounded or preflight status. A separate stale controller report is
+**Unconfirmed**; a fresh controller failure still appears as **Failed**.
+Replacing a running swarm with Hold or another command normally ends the old
+operation as **superseded**, not a successful completed flight and not an
+unexpected controller failure. The old operation's replacement notice is
+informational; separately verify the new Hold/Return result on every aircraft.
+
 Operate is read-only except for explicit flight controls. Its diagram shows live
 roles and flight/following status, not geographic spacing or editable offsets.
 Secondary actions and links are behind the header overflow control. Hold remains
@@ -126,7 +184,7 @@ by fresh telemetry. Unconfirmed work remains visible; dismissing a failure notic
 does not cancel a command. Full command history remains in the existing activity/log surfaces.
 
 **Apply during flight:** editing alone sends nothing. Applying changes the GCS
-configuration that running swarm processes poll. If affected aircraft are
+configuration that running swarm processes watch and reconcile. If affected aircraft are
 unreachable, **Apply anyway** explicitly accepts that reachable aircraft may
 change first and others may adopt the plan on reconnect. This is not simultaneous
 dispatch or collision avoidance. The readback strip separates **Applied** (effective
@@ -147,9 +205,35 @@ its configured PX4 return height and home position; the dialog does not invent
 or override those values. Globe remains the geographic view; the Swarm page
 uses a compact relationship/status diagram instead.
 
+Takeoff, Start Swarm and Managed Return share the exact **To** choice. Accepted
+reduced Takeoff targets carry forward; cancelled edits do not. Choices survive
+navigation in the same browser session/operator/runtime/cluster. A new cluster
+defaults to its full roster; reconnects never add targets. **Hold all** is the
+explicit whole-cluster exception. Before returning a source, MDS checks for
+omitted tracked pending/active followers; include them or stop them explicitly.
+This check repeats before each RTL and does not replace flight-path separation.
+
+![Measured two-aircraft SITL return at a 10-second command interval](../assets/smart-swarm/sequential-return-sitl.png)
+
+Measured SITL example: the dashed lines mark RTL submissions, not landing
+clearance. Height is relative to each aircraft's own home. This run illustrates
+the queue; it does not prove separation for other homes, heights or return paths.
+The rehearsal selected two flying aircraft with a third configured but offline:
+Takeoff, following, Stop/Start and selected Managed Return completed without
+changing the saved formation. Returning only the leader while its follower was
+active was rejected before Hold. To repeat this in an isolated SITL deployment:
+
+```bash
+python3 tools/validate_sequential_return_runtime.py \
+  --base-url http://127.0.0.1:5000 --drone-ids 1 2 --delay-sec 10 \
+  --exercise-operator-flow --check-partial-leader-return --output-dir /tmp/return-rehearsal
+```
+
+This validator refuses REAL mode and never changes saved roles or offsets.
+
 ### Hold Swarm
 
-**Hold Swarm** sends Hold to the entire displayed cluster, including its leader,
+**Hold all** sends Hold to the entire displayed cluster, including its leader,
 in one press. It remains available while routine commands are waiting; no
 confirmation dialog or remembered Swarm session is required. Roles and offsets
 are preserved. Held aircraft do not resume following when the leader moves:
@@ -164,16 +248,9 @@ networked flight-mode request, not a replacement for the pilot's RC takeover.
 
 ### Design persistence workflow
 
-The `Swarm Design` page separates local assignment saves from fleet-wide Git
-write-back during the current compatibility phase:
-
-- `Draft` stays in the browser and never changes the GCS or aircraft.
-- `Apply` writes the current validated `swarm.json` assignment set on the GCS.
-- `Publish` commits and pushes the already-applied plan so nodes can receive it
-  through the repository sync path.
-- A failed commit or push is reported as local-save success plus Git write-back
-  failure, never as complete success.
-- Progress distinguishes the local save, commit, and remote push.
+Use the **Apply plan** and **Save to repo** controls described above. A failed
+repository publication does not undo a successful GCS Apply; retry publication
+without reapplying. Progress distinguishes the GCS save, commit and remote push.
 
 Offset fields accept signed meter values. On mobile, use the normal text
 keyboard if the numeric keyboard does not expose a minus key.
@@ -182,12 +259,15 @@ Smart Swarm now has two clean command scopes:
 
 ### 1. Single-drone commands
 
-Use the normal drone action controls when you want to affect only one aircraft.
+Use Overview's general aircraft actions when you want to affect only one
+aircraft. New mission starts belong on that mission's dedicated page with its
+own reviewed targets, not on Overview.
 
 Examples:
+
 - send `RTL` to one drone
 - send `LAND` to one drone
-- send a new mission to one drone
+- select one aircraft in the relevant mission workspace when that mission supports a single-aircraft scope
 
 These commands stay scoped to that drone. They do **not** automatically cancel Smart Swarm on unrelated drones.
 
@@ -197,14 +277,17 @@ Important caveat:
 - that can mean continued following, upstream reassignment, or self-hold, depending on topology and live health
 - so command scope stays local, but topology side effects can still propagate through the follow chain
 
-### 2. Normal Dashboard start
+### 2. Normal Smart Swarm start
 
-The normal field flow is intentionally short: take off using MDS, QGroundControl,
-or the RC, let the aircraft stabilize, then open `Overview` and select **Smart
-Swarm** beside `Drone Show`. Review the brief leader/offset/status summary,
-click **Start Smart Swarm**, then **Confirm start**. Opening the card never
-sends a command. MDS resolves the saved executable cluster and starts the complete
-dependency-closed cluster. The takeoff does not have to come from MDS.
+Open **Smart Swarm → Operate**, select the saved cluster and review its
+leader/offset/status summary. Use **Takeoff** there, or take off through
+QGroundControl or RC, and let the aircraft stabilize. Choose **Start Swarm** and
+confirm the reviewed aircraft. Opening the page or changing inspection never
+sends a command. **To** initially contains the complete saved cluster. Open it
+only to deliberately command a subset. Required unselected upstream aircraft
+become read-only leader references, not additional command recipients; saved
+follow links are never rewritten. The takeoff does not have to come from MDS. Overview
+retains fleet awareness and general aircraft actions, not a second swarm launcher.
 
 The Start review reads each selected aircraft's own admission decision. A
 single status shows `Checking aircraft`, `Finishing takeoff`, a named blocker,
@@ -229,37 +312,41 @@ already-confirmed command. Pending intent is scoped to that backend/runtime.
 MDS still performs authoritative node-side airborne, PX4, link, and
 configuration checks. These are not UI bypasses. Dashboard telemetry age is
 advisory, not a second start gate. Start normally includes every displayed saved
-role, independently of the dashboard's generic selection checkboxes. If a
-follower is unavailable, `Start without…` offers one explicit confirmation
-for a dependency-safe partial formation;
-this is labelled partial and never silently called a full swarm. An unavailable
-leader cannot be bypassed because its descendants would be orphaned.
+role, independently of Overview's generic selection checkboxes. **To** also
+supports an explicit healthy subset or follower retry. References need current
+native airborne evidence, compatible software and matching live follow links;
+they are checked before dispatch and again before the required-role barrier
+releases. They receive no Start and introduce no ongoing GCS flight dependency.
+An unavailable/returning source blocks Start rather than orphaning its followers.
+Full-cluster starts retain the existing older-companion wire contract.
+
+Recipient edits affect future Takeoff/Start/Managed Return/individual recovery.
+They do not stop an existing follower. **Hold all** explicitly retains full
+displayed-cluster recovery. The
+runtime preview reports latest ownership per aircraft, not just the newest
+cluster command, so an old leader cannot mask a new follower retry.
 
 ### 3. Advanced Swarm runtime commands
 
-Use the `Smart Swarm Runtime` panel on the `Swarm Design` page when the intent is live Smart Swarm control:
+Use **Smart Swarm → Operate** for live Smart Swarm control:
 
-- `Start Smart Swarm`
-- `Stop Swarm (Hold)`
-- `Land Swarm`
-- `RTL Swarm`
+- **Start Swarm** for the reviewed saved cluster
+- **Hold all** for the displayed cluster
+- **Managed Return** for sequential RTL to **To**
+- **Other actions → Stop following / Land here / Immediate RTL** for explicit recovery
 
-The runtime panel supports:
-
-- `Selected Drone`
-- `Selected Cluster`
-
-Specific cluster selections in `Formation Analysis` also drive the cluster-scoped runtime target. The `All executable clusters` option is analysis-only and does not issue one command across the full fleet.
-The runtime panel defaults to `Selected Drone`, so choose `Selected Cluster`
-and verify the named target list in the confirmation when both aircraft should
-receive Hold, Land, or RTL. An ambiguous, stale, or non-executable cluster
-selection blocks cluster commands instead of silently choosing another cluster.
-The runtime preview/targets use the saved assignment; unsaved formation edits
+The Operate cluster selection is independent of formation inspection and
+Overview's general aircraft selection. **To** selects the aircraft for Takeoff,
+Start, Managed Return and Other actions; inspect the exact target list before
+confirming. Hold all retains the entire displayed cluster. An ambiguous or non-executable
+cluster blocks cluster commands instead of silently choosing another cluster.
+Runtime preview and targets use the saved assignment; unsaved formation edits
 do not silently change a recovery target set.
 
-`Stop Swarm (Hold)` ends following and commands PX4 Hold on each selected
-airborne drone; resuming requires an explicit Start. `Land Swarm` commands each
-selected drone to land at its current position. `RTL Swarm` ends following and
+**Hold all** ends following across the cluster; **Other actions → Stop following**
+ends following only for To. Both command PX4 Hold on the addressed
+airborne drone; resuming requires an explicit Start. **Land here** commands each
+selected drone to land at its current position. **Immediate RTL** ends following and
 commands each selected drone's own PX4 Return mode. It is **not** a coordinated
 formation return: PX4 may climb, choose different paths/destinations, or reject
 Return if its position/home requirements are unmet. MDS recovery commands
@@ -271,8 +358,9 @@ This keeps swarm intent explicit instead of overloading the generic command send
 
 ### Sequential Return
 
-On the same runtime panel, select the drone or cluster, set **RTL interval**
-(default **10 seconds**, range 1–300 seconds), then **Sequential Return**.
+On **Smart Swarm → Operate**, check **To** and choose **Managed Return** for
+those aircraft.
+Review the **Return interval** (default **10 seconds**, range 1–300 seconds).
 The confirmation lists the exact aircraft order and relative dispatch times.
 MDS ends following and confirms Hold on all selected aircraft, then dispatches
 each aircraft's normal PX4 RTL in that order. The interval is a minimum between
@@ -297,14 +385,19 @@ does not claim that the aircraft have landed. Plan battery reserve for the
 waiting interval as well as each return flight. This initial version adds no
 formation, leader-election, PX4 parameter or estimator changes.
 
-The dashboard Smart Swarm card uses the same tracked session contract as the
-advanced runtime; it does not use the generic mission scheduling form. The
-advanced page remains the place for multiple clusters and recovery controls.
-Start requires a complete saved follow chain, so choose `Selected Cluster`
-when the selected drone is a follower; leader-only starts and per-drone
-recovery remain available.
+The dedicated Operate page owns the tracked swarm session contract, cluster
+selection and recovery controls; it does not use a generic mission scheduling
+form. Start requires a complete saved follow chain. Individual recovery remains
+an explicit **Other actions** choice, not a change to Start's cluster scope.
 
-These runtime commands now publish into the same shared command lifecycle stream as `Command Control` and per-drone airborne overrides. That means the backend-backed live/recent command monitor can recover command context after refresh/navigation instead of keeping Smart Swarm runtime actions as toast-only events.
+Overview's general **Return** means immediate native PX4 RTL for its selected
+aircraft. It is not Managed Return and does not create a sequential return queue.
+See the [Dashboard Operator Guide](../guides/dashboard-operator.md) for general actions.
+
+These runtime commands publish into the same shared command activity as
+Overview's general aircraft actions. The backend-backed live/recent monitor
+recovers command context after refresh/navigation; runtime actions are not
+toast-only events.
 
 Mixed-mission leader rule:
 
@@ -324,15 +417,15 @@ Mixed-mission leader rule:
 
 ### Formation preview and live readiness
 
-Overview and the dedicated **Operate** tab share one saved-cluster control panel:
-**Takeoff → Start Swarm → Return** are separate confirmed actions, never a combined
+The dedicated **Smart Swarm → Operate** tab owns the saved-cluster control panel:
+**Takeoff → Start Swarm → Managed Return** are separate confirmed actions, never a combined
 automatic mission. The first saved cluster is the initial default. The runtime
 selection is retained for this GCS/mode browser session and is independent of
 drone inspection, formation plots and general dashboard dispatch selection.
 If the selected cluster disappears, select again; MDS never substitutes another.
 The **Design Swarm** tab holds editing, graphs, imports, exports and publishing.
 
-Return defaults to **Sequential RTL · 10 s** with the order and interval in its
+Managed Return defaults to **Sequential RTL · 10 s** with the order and interval in its
 confirmation. This is timed dispatch, not collision avoidance or waiting for
 each aircraft to land. Paths may overlap. Immediate RTL, Land here and explicit
 individual-aircraft recovery are in **Other actions**. **Stop following** commands
@@ -369,11 +462,14 @@ Important operator rule:
 - normal Smart Swarm starts are cluster-first: the page opens the first executable
   saved cluster and shows the full leader/follower roster before confirmation;
   a leader-only target is rejected before dispatch
-- a multi-drone Take Off is not physically atomic after dispatch: every node
-  repeats its own final readiness and ground checks, so one aircraft can still
-  reject while another accepts. For the first field validation, launch and
-  confirm each aircraft individually, let both settle in Hold, and only then
-  start the exact Smart Swarm cluster.
+- multi-aircraft standalone Takeoff defaults to **Launch mode → All armed first**:
+  confirm native readiness, arm all, then release takeoff only after every
+  selected aircraft confirms armed on ground. The shared dialog includes height,
+  per-aircraft reasons and progress. See the
+  [Coordinated Takeoff guide](../guides/coordinated-takeoff.md).
+  Launch is not physically atomic after release: one aircraft can still reject
+  while another accepts. Verify each aircraft is airborne and settled before
+  starting the exact Smart Swarm cluster. PX4 checks are unchanged.
 
 ### Runtime ownership and leader changes
 
@@ -400,6 +496,15 @@ Automatic promotion is disabled by default. Advanced deployment settings in
 `/etc/mds/local.env` are `MDS_SMART_SWARM_LEADER_LOSS_STRATEGY=hold_recover`,
 `MDS_SMART_SWARM_LEADER_RECOVERY_WAIT_SEC=10`, and
 `MDS_SMART_SWARM_LEADER_RECOVERY_STABLE_SEC=1`. These are not dashboard switches.
+
+`MDS_SMART_SWARM_HARD_STALE_TIMEOUT_SEC=2.5` controls when stale leader data
+initiates protective Hold. It is available in advanced node configuration and
+must exceed the accepted-source freshness threshold. All timing changes require
+a grounded node-service restart. Invalid/non-finite recovery timing or a stable
+interval not shorter than the wait window logs a warning and restores 10s/1s
+defaults at startup, rather than failing when protective recovery is needed.
+Automatic promotion remains disabled by default; these settings do not change
+saved roles or make an unvalidated moving handover available.
 Change them only while grounded and restart the affected runtime. For deliberate
 multi-level failover, set the strategy to `upstream_or_hold` consistently on GCS
 and nodes; after the recovery window it follows a cycle-safe upstream leader,
@@ -546,11 +651,36 @@ That workflow captures:
 
 ### Current transport behavior and next-step roadmap
 
+The configuration watch sends a complete revisioned snapshot on connection and
+after canonical saves, before optional Git publication. Slow clients keep only
+the latest snapshot. Reconnect uses jittered backoff capped at 15 seconds and
+always resynchronizes current state; missed edits are not replayed as commands.
+One server reader also checks for external Git/file replacement every second
+while clients are subscribed. Invalid/empty snapshots retain the last valid plan.
+Configuration connectivity alone never triggers Hold or changes leader-loss policy.
+
+Both push and HTTP feed the same serial installer. Existing applied-revision
+reports remain the evidence of installation, not simply receipt or arrival at a
+formation position. Older servers continue to work through HTTP fallback.
+This transport changes neither leader-motion telemetry nor flight gains.
+
+**Acceptance boundary:** source/transport tests are not flight acceptance. Moving
+leader handover remains a separate unfinished capability; current transitions
+still use the existing Hold/ownership path. Do not use faster delivery as proof
+of synchronized role changes or collision avoidance.
+
 Current runtime contract:
 
 - follower-to-leader state is websocket-primary with bounded reconnect/backoff
 - follower-to-leader HTTP fallback is still available and intentionally kept
-- follower-to-GCS assignment refresh remains periodic HTTP polling
+- fallback acquisition continues while bounded WS probes run; a valid advancing
+  motion sample, not TCP/Pong/error traffic, renews stream health. An assignment
+  change cancels the old target even during message silence. Both paths feed the
+  existing native identity/freshness/order validator, so a late fallback response
+  cannot undo newer motion.
+- all active roles subscribe to the authenticated GCS formation watch; HTTP
+  reconciliation runs every 30 seconds while connected, or every 2 seconds
+  while disconnected (plus request duration)
 - follower-to-GCS leader-change notify remains HTTP POST
 - stale-data and transport-loss handling share the same failover path
 
@@ -563,13 +693,20 @@ Why this is the correct current design:
 
 Why it is still not the final large-scale architecture:
 
-- GCS-side live telemetry views are still a mix of polling and streams
-- assignment refresh is still HTTP polling rather than push-driven
+- General GCS observations use shared WS/HTTP acquisition and browser ownership;
+  native mission/admission, configuration, event logs and file transactions keep
+  their distinct authority and semantics.
+- GCS telemetry polls now run independently per aircraft with bounded async
+  connections and backoff for unreachable peers, so offline fleet entries do
+  not serially delay healthy aircraft. Native timestamps and stale thresholds
+  are unchanged; this is observation transport, not a guidance-gain change.
+- formation delivery is recoverable desired-state synchronization, not a
+  simultaneous multi-aircraft authority-transfer protocol
 - real-world degraded networks can still benefit from transport metrics, confidence scoring, and richer outage analytics
 
 Recommended next industrial path:
 
-1. keep the websocket + HTTP dual path
+1. keep the websocket + HTTP recovery path, without two continuous normal readers
 2. validate degraded-network behavior under induced delay/loss/partitions
 3. add richer operator-visible leader-state confidence and transport metrics
 4. only then consider payload compression or more aggressive transport optimization
@@ -733,6 +870,10 @@ That prevents live leader changes from silently introducing a loop into the foll
 
 ## Runtime Guarantees Added In This Audit
 
+The UI-default bullet below records the earlier runtime panel. For the current
+saved-cluster Operate scope and individual recovery controls, see
+[Advanced Swarm runtime commands](#3-advanced-swarm-runtime-commands).
+
 - dedicated leader-state stream at `WS /ws/swarm-state` with `GET /api/v1/swarm/state` fallback
 - expected leader identity, producer validity, finite motion values, and
   millisecond source freshness are checked before a sample enters control
@@ -866,5 +1007,7 @@ paused leader resumes telemetry after unpause.
 
 - richer operator-facing swarm stop/hold state reporting
 - smarter cluster-level leader election policies
-- transport optimization beyond HTTP polling if very large swarms require it
+- coordinated moving leader handover with verified successor motion ownership,
+  parent-first activation and durable recovery evidence; the current role-change
+  path is not a validated continuous moving handover
 - UI playback and incident review tied to unified logging

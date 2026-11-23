@@ -19,6 +19,12 @@ Tool registry entries must define:
 
 Interpretation rules:
 
+- Fleet HTTP and WebSocket readers observe shared domain evidence; neither a
+  socket connection nor its snapshot sequence proves fresh FC measurements,
+  native action readiness or aircraft installation of a saved formation.
+  Simurgh/MCP stays optional and does not create its own aircraft acquisition
+  service or enter the direct leader/follower control loop. Reconnect never
+  authorizes action replay or changes exact reviewed recipients.
 - `allow` means the tool can run after policy checks pass.
 - `guarded` means policy must require explicit approval before execution.
 - `exclude` means the tool is documented as intentionally unavailable.
@@ -71,6 +77,13 @@ Current callable argument scope:
   ULog bytes, raw topic arrays, raw logged-message text, erase actions, browser
   download content, pasted artifacts, streams, or raw ULog/QGC/field-log
   artifacts to a provider or public context.
+- Raw ULog create, staged-job status/content, deletion, erase-all, and
+  `GET /api/logs/drone/{drone_id}/ulog/download-requests/{request_id}` remain
+  outside model/MCP tools. Request recovery is actor-bound browser transfer
+  state and can issue a signed content handle; returning JSON or using GET does
+  not make it sanitized read-only evidence. Use the approved inventory and
+  derived-summary tools instead. Never replay a download create to resolve an
+  uncertain result.
 - SkyBrush show-analysis tools (`mds.shows.skybrush.metrics_snapshot.read`,
   `mds.shows.skybrush.safety_report.read`, and
   `mds.shows.skybrush.validation.read`) accept `{}` only and inspect the current

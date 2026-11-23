@@ -1,712 +1,189 @@
-// src/pages/Overview.js
-import React, { useState, useEffect, useRef } from 'react';
-import PropTypes from 'prop-types';
-import { FaBroadcastTower, FaChevronDown } from 'react-icons/fa';
-import CommandSender from '../components/CommandSender';
-import ClusterScopeBar from '../components/ClusterScopeBar';
-import DroneWidget from '../components/DroneWidget';
-import ExpandedDronePortal from '../components/ExpandedDronePortal';
-import { EmptyState, MetricStrip, OperatorNotice, PageShell, StatusBadge } from '../components/ui';
-import useFetch from '../hooks/useFetch';
-import {
-  DRONE_RUNTIME_CLOCK_PROP,
-  FIELD_NAMES,
-  attachDroneRuntimeClock,
-  normalizeTelemetryResponse,
-} from '../constants/fieldMappings';
-import { normalizeComparableId } from '../utilities/missionIdentityUtils';
-import { getDroneRuntimeStatus } from '../utilities/droneRuntimeStatus';
-import { getDroneReadinessModel } from '../utilities/droneReadiness';
-import { classifyNodeBootStatus } from '../utilities/fleetOpsViewModel';
-import {
-  DRONE_SEARCH_PLACEHOLDER,
-  matchesDroneSearchQuery,
-} from '../utilities/dronePresentation';
-import {
-  buildClusterScopeOptions,
-  buildSwarmViewModel,
-  filterClustersByScope,
-} from '../utilities/swarmDesignUtils';
-import {
-  GCS_ROUTE_KEYS,
-  getFleetConfigResponse,
-  getFleetTelemetryResponse,
-  unwrapFleetTelemetryPayload,
-  unwrapSwarmConfigPayload,
-} from '../services/gcsApiService';
+import React, { lazy, Suspense, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { FaBorderAll, FaList, FaMapMarkedAlt, FaPlaneDeparture, FaHandPaper, FaPlaneArrival, FaHome, FaEllipsisH, FaExclamationTriangle, FaLayerGroup, FaEye, FaBroadcastTower, FaPlane } from 'react-icons/fa';
+import { getBackendURL } from '../config/apiConfig';
+import { DRONE_ACTION_TYPES, getCommandName } from '../constants/droneConstants';
+import { getFleetReferenceClock } from '../utilities/commandScheduling';
+import { matchesDroneSearchQuery } from '../utilities/dronePresentation';
+import { buildSwarmViewModel } from '../utilities/swarmDesignUtils';
+import TakeoffDialog from '../components/TakeoffDialog';
+import MoreActionsPanel from '../features/fleet-overview/MoreActionsPanel';
+import FleetMoveControl from '../features/fleet-overview/FleetMoveControl';
+import { AircraftInspector, AircraftTile } from '../features/fleet-overview/FleetAircraft';
+import ActionReview, { buildActionStorageKey, readPendingAction, readPendingActions } from '../features/fleet-overview/ActionReview';
+import useFleetResources from '../features/fleet-overview/useFleetResources';
+import useFleetAttention from '../features/fleet-overview/useFleetAttention';
+import { buildFleetViewModel } from '../features/fleet-overview/fleetViewModel';
+import { filterFleetAircraft, groupFleetAircraft, renderedFleetAircraft } from '../features/fleet-overview/fleetDisplay';
+import CommandAircraftControl from '../features/fleet-overview/CommandAircraftControl';
+import CommandAircraftPicker from '../features/fleet-overview/CommandAircraftPicker';
+import { createTargetSelectionState, getTargetSelectionReview, getTargetSelectionStorageScope, parseTargetSelection, serializeTargetSelection, targetSelectionReducer } from '../features/fleet-overview/targetSelection';
 import '../styles/Overview.css';
 
-function normalizeNodeBootStatusMap(nodeBootPayload) {
-  const nodes = nodeBootPayload?.nodes && typeof nodeBootPayload.nodes === 'object' ? nodeBootPayload.nodes : {};
-  const byKey = new Map();
-  Object.entries(nodes).forEach(([key, node]) => {
-    if (!node || typeof node !== 'object') {
-      return;
-    }
-    [node.hw_id, node.pos_id, key]
-      .filter((value) => value !== undefined && value !== null && String(value).trim())
-      .forEach((value) => {
-        byKey.set(String(value), node);
-        const normalized = normalizeComparableId(value);
-        if (normalized) {
-          byKey.set(normalized, node);
-        }
-      });
-  });
-  return { nodes, byKey };
+const FleetMap = lazy(() => import('../features/fleet-overview/FleetMap'));
+const PRIMARY = [['TAKE_OFF', 'Takeoff', FaPlaneDeparture], ['HOLD', 'Hold', FaHandPaper], ['LAND', 'Land', FaPlaneArrival], ['RETURN_RTL', 'Return', FaHome]];
+
+function readPreference(key, fallback) {
+  try { const value = localStorage.getItem(key); return ['board', 'list', 'map'].includes(value) ? value : fallback; }
+  catch (_) { return fallback; }
 }
 
-const Overview = ({ setSelectedDrone, runtimeMode = 'unknown' }) => {
-  const [drones, setDrones] = useState([]);
-  const [configByHwId, setConfigByHwId] = useState({});
-  const [expandedDrone, setExpandedDrone] = useState(null);
-  const [droneQuery, setDroneQuery] = useState('');
-  const [cardFilter, setCardFilter] = useState('active');
-  const [clusterScope, setClusterScope] = useState('all');
-  const [commandTargetMode, setCommandTargetMode] = useState('selected');
-  const [commandSelectedDrones, setCommandSelectedDrones] = useState([]);
-  const [commandClusterScope, setCommandClusterScope] = useState('');
-  const [fleetPanelExpanded, setFleetPanelExpanded] = useState(false);
-  const [originRect, setOriginRect] = useState(null);
-  const [error, setError] = useState(null);
-  const [notification, setNotification] = useState(null);
-  const droneRefs = useRef({});
-  const commandDispatchRef = useRef(null);
-  const commandScopeAutoTracksVisibleRef = useRef(true);
-  const lastAutoCommandScopeSignatureRef = useRef('');
-  const { data: swarmDataFetched } = useFetch(GCS_ROUTE_KEYS.swarmConfig);
-  const { data: nodeBootStatusFetched } = useFetch(GCS_ROUTE_KEYS.fleetNodeBootStatus, 3000);
-  const nodeBootStatus = React.useMemo(
-    () => normalizeNodeBootStatusMap(nodeBootStatusFetched),
-    [nodeBootStatusFetched]
-  );
+export default function Overview({ runtimeMode = 'unknown', operatorId = '' }) {
+  const mode = String(runtimeMode || 'unknown').toLowerCase();
+  return <FleetOverview key={`${mode}:${operatorId}`} runtimeMode={mode} operatorId={operatorId} />;
+}
 
+function FleetOverview({ runtimeMode, operatorId }) {
+  const resources = useFleetResources(runtimeMode);
+  const orderRef = useRef([]);
+  const rawModel = useMemo(() => buildFleetViewModel(resources.drones, { nowMs: resources.nowMs, previousOrder: orderRef.current,
+    displayPolicy: resources.displayPolicy }), [resources.drones, resources.nowMs, resources.displayPolicy]);
+  const attention = useFleetAttention(rawModel, resources);
+  const model = attention.model;
+  useEffect(() => { orderRef.current = model.order; }, [model.order]);
+  const [selection, dispatch] = useReducer(targetSelectionReducer, undefined, createTargetSelectionState);
+  const [storageWarning, setStorageWarning] = useState('');
+  const storageScope = useMemo(() => getTargetSelectionStorageScope({ deploymentId: getBackendURL(), runtimeMode, operatorId, sessionId: 'browser-session' }), [runtimeMode, operatorId]);
+  const pendingKey = `mds:fleet-action:v1:${getBackendURL()}:${runtimeMode}:${operatorId || 'session'}`;
+  const [pending, setPending] = useState(() => readPendingActions(pendingKey));
+  const [intent, setIntent] = useState(null);
+  const [takeoff, setTakeoff] = useState(null);
+  const [moveTargets, setMoveTargets] = useState(null);
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState('available');
+  const [view, setView] = useState(() => readPreference('mds:fleet-view:v1', 'board'));
+  const [more, setMore] = useState(null);
+  const [grouped, setGrouped] = useState(false);
+  const [choosingRecipients, setChoosingRecipients] = useState(false);
   useEffect(() => {
-    let active = true;
-
-    const loadConfig = async () => {
-      try {
-        const response = await getFleetConfigResponse();
-        if (!active || !Array.isArray(response.data)) {
-          return;
-        }
-
-        const nextConfigByHwId = response.data.reduce((accumulator, entry) => {
-          const hwId = normalizeComparableId(entry?.hw_id);
-          if (hwId) {
-            accumulator[hwId] = entry;
-          }
-          return accumulator;
-        }, {});
-
-        setConfigByHwId(nextConfigByHwId);
-      } catch (loadError) {
-        console.warn('Failed to load config metadata for overview cards:', loadError);
-      }
-    };
-
-    loadConfig();
-    const interval = setInterval(loadConfig, 30000);
-
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
-  }, []);
-
+    // Browser receipt reconciliation only: this never sends or retries a command.
+    setPending((previous) => {
+      const next = readPendingActions(pendingKey);
+      return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+    });
+  }, [pendingKey, resources.nowMs]);
+  const [params, setParams] = useSearchParams();
+  const inspected = model.byId.get(params.get('aircraft')) || null;
+  const inspect = (id) => setParams((previous) => { const next = new URLSearchParams(previous); if (id) next.set('aircraft', id); else next.delete('aircraft'); return next; }, { replace: true });
+  const groups = useMemo(() => buildSwarmViewModel(resources.swarm, resources.drones)?.clusters || [], [resources.swarm, resources.drones]);
+  const hasMultipleGroups = groups.filter((group) => group.drones.length > 1).length > 1;
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const response = await getFleetTelemetryResponse();
-        const clockMeta = {
-          receivedAtMs: Date.now(),
-          serverNowMs: response.headers?.['x-mds-server-time'] ?? response.headers?.date ?? null,
-        };
-        const normalizedTelemetry = normalizeTelemetryResponse(
-          unwrapFleetTelemetryPayload(response.data),
-          clockMeta
-        );
-        const droneIds = Array.from(new Set([
-          ...Object.keys(configByHwId || {}),
-          ...Object.keys(normalizedTelemetry || {}).map((hwId) => normalizeComparableId(hwId)).filter(Boolean),
-          ...Object.values(nodeBootStatus.nodes || {})
-            .map((node) => normalizeComparableId(node?.hw_id) || normalizeComparableId(node?.pos_id))
-            .filter(Boolean),
-        ]));
-        const dronesArray = droneIds.map((hw_ID) => {
-          const normalizedHwId = normalizeComparableId(hw_ID);
-          const telemetry = normalizedTelemetry[hw_ID] || normalizedTelemetry[normalizedHwId] || {};
-          const configEntry = configByHwId[normalizedHwId] || {};
-          const bootStatus = nodeBootStatus.byKey.get(String(normalizedHwId || ''))
-            || nodeBootStatus.byKey.get(String(configEntry?.pos_id || ''))
-            || nodeBootStatus.byKey.get(String(telemetry?.pos_id || ''))
-            || null;
-          const mergedDrone = {
-            ...configEntry,
-            hw_ID: normalizedHwId || hw_ID,
-            [FIELD_NAMES.HW_ID]: normalizedHwId || hw_ID,
-            node_boot_status: bootStatus,
-            ...telemetry,
-          };
-          const runtimeClock = telemetry?.[DRONE_RUNTIME_CLOCK_PROP];
-          if (runtimeClock) {
-            Object.defineProperty(mergedDrone, DRONE_RUNTIME_CLOCK_PROP, {
-              value: runtimeClock,
-              configurable: true,
-              writable: true,
-              enumerable: false,
-            });
-            return mergedDrone;
-          }
-          return attachDroneRuntimeClock(mergedDrone, clockMeta);
-        });
+    if (!storageScope || !resources.config.response || !resources.telemetry.response || selection.initialized) return;
+    let saved;
+    try { saved = parseTargetSelection(window[`${storageScope.storage}Storage`].getItem(storageScope.key)); }
+    catch (_) { saved = null; setStorageWarning('Selection could not be restored. Review aircraft before sending.'); }
+    if (saved?.valid === false) setStorageWarning('Saved selection unreadable. Select aircraft again.');
+    dispatch({ type: 'initialize', configuredIds: resources.configuredIds,
+      defaultIds: model.aircraft.filter((item) => item.availability.available).map((item) => item.id), savedIds: saved?.ids });
+  }, [storageScope, resources.config.response, resources.telemetry.response, resources.configuredIds, model.aircraft, selection.initialized]);
+  useEffect(() => {
+    if (!storageScope || !selection.initialized) return;
+    try { window[`${storageScope.storage}Storage`].setItem(storageScope.key, serializeTargetSelection(selection)); }
+    catch (_) { setStorageWarning('Selection will not be remembered in this browser.'); }
+  }, [selection, storageScope]);
 
-        const validDrones = dronesArray.filter(
-          (drone) =>
-            drone.position_lat !== undefined &&
-            drone.position_long !== undefined &&
-            drone.battery_voltage !== undefined
-        );
-
-        const invalidDrones = dronesArray.filter(
-          (drone) => !validDrones.includes(drone)
-        );
-
-        setDrones(dronesArray);
-        setError(null);
-        setNotification(null);
-
-        if (invalidDrones.length > 0) {
-          setNotification(`${invalidDrones.length} drones have incomplete live telemetry. Use All to inspect offline or never-seen configured nodes.`);
-        }
-      } catch (error) {
-        setError('Failed to fetch data from the backend.');
-        setNotification('Network issue, retrying...');
-      }
-    };
-
-    fetchData();
-    const pollingInterval = setInterval(fetchData, 1000);
-
-    return () => {
-      clearInterval(pollingInterval);
-    };
-  }, [configByHwId, nodeBootStatus.byKey, nodeBootStatus.nodes]);
-
-  const toggleDroneDetails = (drone) => {
-    if (expandedDrone && expandedDrone.hw_ID === drone.hw_ID) {
-      setExpandedDrone(null);
-      setOriginRect(null);
-    } else {
-      // Get the position of the clicked drone widget for animation
-      const droneElement = droneRefs.current[drone.hw_ID];
-      if (droneElement) {
-        const rect = droneElement.getBoundingClientRect();
-        setOriginRect(rect);
-      }
-      setExpandedDrone(drone);
+  const selectedIds = new Set(selection.ids);
+  const visible = filterFleetAircraft(model.aircraft, { query, filter, selectedIds, matches: matchesDroneSearchQuery });
+  const displayGroups = groupFleetAircraft(visible, groups, grouped && hasMultipleGroups);
+  const rendered = renderedFleetAircraft(visible, view);
+  const review = getTargetSelectionReview(selection, resources.configuredIds, rendered.map(item => item.id));
+  const runtimeKnown = ['real', 'sitl'].includes(runtimeMode);
+  const canAct = runtimeKnown && selection.initialized && review.count > 0 && !review.unresolvedIds.length;
+  const clock = getFleetReferenceClock(resources.drones, resources.nowMs);
+  const chooseView = (next) => { setView(next); try { localStorage.setItem('mds:fleet-view:v1', next); } catch (_) {} };
+  const showRecipients = () => { setFilter('selected'); setQuery(''); if (view === 'map') chooseView('list'); };
+  const closeReview = () => { setIntent(null); setPending(readPendingActions(pendingKey)); };
+  const request = (body, ids = selection.ids) => {
+    if (!runtimeKnown || !ids.length || ids.some((id) => !resources.configuredIds.includes(id))) return;
+    const command = { ...body, target_drone_ids: [...ids], uiMeta: { ...body.uiMeta,
+      targetLabel: `${ids.length} aircraft`, targetDescriptor: ids.map((id) => `${model.byId.get(id)?.label || 'Aircraft'} · H${id}`).join(', ') } };
+    delete command.target_scope;
+    setMore(null);
+    if (body.mission_type === DRONE_ACTION_TYPES.TAKE_OFF) setTakeoff({ ...command, takeoff_altitude: body.takeoff_altitude ?? 10 });
+    else {
+      const key = buildActionStorageKey(pendingKey, command);
+      if (!key) return;
+      const saved = readPendingAction(key);
+      const legacy = pending.find((entry) => buildActionStorageKey(pendingKey, entry.command) === key);
+      setIntent({ storageKey: saved ? key : legacy?.storageKey || key,
+        command: saved || legacy ? { ...(saved || legacy.command), recover: true } : command });
     }
   };
-
-  const closeExpandedDrone = () => {
-    setExpandedDrone(null);
-    setOriginRect(null);
+  const action = (key, item = null) => {
+    if (item) inspect(null);
+    request({ mission_type: DRONE_ACTION_TYPES[key], trigger_time: 0, uiMeta: { operatorLabel: PRIMARY.find(([candidate]) => candidate === key)?.[1] || key } }, item ? [item.id] : selection.ids);
   };
-
-  const fleetSummary = React.useMemo(() => {
-    const summary = {
-      total: drones.length,
-      online: 0,
-      degraded: 0,
-      unavailable: 0,
-      ready: 0,
-      armed: 0,
-    };
-
-    drones.forEach((drone) => {
-      const runtimeStatus = getDroneRuntimeStatus(drone, Date.now());
-      const readiness = getDroneReadinessModel(drone, runtimeStatus);
-
-      if (runtimeStatus.level === 'online') {
-        summary.online += 1;
-      } else if (runtimeStatus.level === 'degraded') {
-        summary.degraded += 1;
-      } else {
-        summary.unavailable += 1;
-      }
-
-      if (readiness.isReady) {
-        summary.ready += 1;
-      }
-
-      if (drone?.[FIELD_NAMES.IS_ARMED]) {
-        summary.armed += 1;
-      }
-    });
-
-    return summary;
-  }, [drones]);
-
-  const swarmAssignments = React.useMemo(
-    () => unwrapSwarmConfigPayload(swarmDataFetched),
-    [swarmDataFetched]
-  );
-
-  const swarmViewModel = React.useMemo(
-    () => buildSwarmViewModel(swarmAssignments, drones),
-    [drones, swarmAssignments]
-  );
-  const clusterScopeOptions = React.useMemo(
-    () => buildClusterScopeOptions(swarmViewModel?.clusters || [], drones.length),
-    [drones.length, swarmViewModel?.clusters]
-  );
-  const visibleClusters = React.useMemo(
-    () => filterClustersByScope(swarmViewModel?.clusters || [], clusterScope),
-    [clusterScope, swarmViewModel?.clusters]
-  );
-  const visibleClusterHwIds = React.useMemo(() => {
-    if (clusterScope === 'all') {
-      return null;
-    }
-
-    return new Set(
-      visibleClusters.flatMap((cluster) => cluster.drones.map((drone) => normalizeComparableId(drone.hw_id)))
-    );
-  }, [clusterScope, visibleClusters]);
-
-  const filteredDrones = React.useMemo(() => {
-    const nowMs = Date.now();
-
-    return drones.filter((drone) => {
-      const hwId = normalizeComparableId(drone?.[FIELD_NAMES.HW_ID] || drone?.hw_ID);
-      if (visibleClusterHwIds && !visibleClusterHwIds.has(hwId)) {
-        return false;
-      }
-
-      if (!matchesDroneSearchQuery(drone, droneQuery)) {
-        return false;
-      }
-
-      const runtimeStatus = getDroneRuntimeStatus(drone, nowMs);
-      const readiness = getDroneReadinessModel(drone, runtimeStatus);
-      const bootStatus = classifyNodeBootStatus(drone.node_boot_status, nowMs);
-
-      switch (cardFilter) {
-        case 'active':
-          return runtimeStatus.level === 'online'
-            || runtimeStatus.level === 'degraded'
-            || runtimeStatus.indicatorClass === 'lost'
-            || bootStatus.active;
-        case 'attention':
-          return runtimeStatus.level !== 'online' || !readiness.isReady || bootStatus.tone === 'danger' || bootStatus.tone === 'warning';
-        case 'ready':
-          return readiness.isReady;
-        case 'armed':
-          return Boolean(drone?.[FIELD_NAMES.IS_ARMED]);
-        case 'online':
-          return runtimeStatus.level === 'online';
-        default:
-          return true;
-      }
-    });
-  }, [cardFilter, droneQuery, drones, visibleClusterHwIds]);
-  const visibleCommandScopeIds = React.useMemo(() => {
-    const nowMs = Date.now();
-    return filteredDrones
-      .filter((drone) => {
-        const runtimeStatus = getDroneRuntimeStatus(drone, nowMs);
-        return runtimeStatus.level === 'online' || runtimeStatus.level === 'degraded';
-      })
-      .map((drone) => normalizeComparableId(drone?.[FIELD_NAMES.HW_ID] || drone?.hw_ID))
-      .filter(Boolean);
-  }, [filteredDrones]);
-  const commandClusterTargetIds = React.useMemo(() => {
-    if (!swarmViewModel || !commandClusterScope) {
-      return [];
-    }
-
-    return Array.from(
-      new Set(
-        filterClustersByScope(swarmViewModel.clusters, commandClusterScope)
-          .flatMap((cluster) => cluster.drones.map((drone) => normalizeComparableId(drone.hw_id)))
-          .filter(Boolean),
-      ),
-    );
-  }, [commandClusterScope, swarmViewModel]);
-  const commandScopeIds = React.useMemo(() => {
-    if (commandTargetMode === 'selected') {
-      return commandSelectedDrones.map((value) => String(value));
-    }
-
-    if (commandTargetMode === 'cluster') {
-      return commandClusterTargetIds;
-    }
-
-    return [];
-  }, [commandClusterTargetIds, commandSelectedDrones, commandTargetMode]);
-  const commandScopeSet = React.useMemo(
-    () => new Set(commandScopeIds.map((value) => String(value))),
-    [commandScopeIds],
-  );
-  const visibleScopeMatchesSelection = React.useMemo(() => {
-    if (commandTargetMode !== 'selected' || visibleCommandScopeIds.length !== commandSelectedDrones.length) {
-      return false;
-    }
-
-    const selectedSet = new Set(commandSelectedDrones.map((value) => String(value)));
-    return visibleCommandScopeIds.every((value) => selectedSet.has(String(value)));
-  }, [commandSelectedDrones, commandTargetMode, visibleCommandScopeIds]);
-  const commandScopeSummary = React.useMemo(() => {
-    if (commandTargetMode === 'selected') {
-      if (visibleScopeMatchesSelection) {
-        return `Dispatch · ${commandSelectedDrones.length} visible`;
-      }
-      return `Dispatch · ${commandSelectedDrones.length} selected`;
-    }
-
-    if (commandTargetMode === 'cluster') {
-      const activeCluster = clusterScopeOptions.find((option) => String(option.id) === String(commandClusterScope));
-      if (activeCluster) {
-        return `Dispatch · ${activeCluster.label}`;
-      }
-
-      return `Dispatch · Cluster`;
-    }
-
-    return `Dispatch · All ${drones.length}`;
-  }, [clusterScopeOptions, commandClusterScope, commandSelectedDrones.length, commandTargetMode, drones.length, visibleScopeMatchesSelection]);
-  React.useEffect(() => {
-    const nextSignature = visibleCommandScopeIds.join('\u001f');
-    const selectedSignature = commandSelectedDrones.map((value) => String(value)).join('\u001f');
-    const canAutoTrack = commandScopeAutoTracksVisibleRef.current
-      || (commandTargetMode === 'selected' && selectedSignature === lastAutoCommandScopeSignatureRef.current);
-
-    if (!canAutoTrack) {
-      return;
-    }
-
-    commandScopeAutoTracksVisibleRef.current = true;
-    lastAutoCommandScopeSignatureRef.current = nextSignature;
-
-    if (commandTargetMode !== 'selected') {
-      setCommandTargetMode('selected');
-    }
-
-    if (selectedSignature !== nextSignature) {
-      setCommandSelectedDrones(visibleCommandScopeIds);
-    }
-  }, [commandSelectedDrones, commandTargetMode, visibleCommandScopeIds]);
-  const handleCommandTargetModeChange = React.useCallback((nextMode) => {
-    commandScopeAutoTracksVisibleRef.current = false;
-    setCommandTargetMode(nextMode);
-  }, []);
-  const handleCommandSelectedDronesChange = React.useCallback((nextValue) => {
-    commandScopeAutoTracksVisibleRef.current = false;
-    setCommandSelectedDrones((previousValue) => (
-      typeof nextValue === 'function' ? nextValue(previousValue) : nextValue
-    ));
-  }, []);
-  const applyVisibleCardsToCommandScope = React.useCallback(() => {
-    if (visibleCommandScopeIds.length === 0) {
-      return;
-    }
-
-    commandScopeAutoTracksVisibleRef.current = true;
-    setCommandTargetMode('selected');
-    setCommandSelectedDrones(visibleCommandScopeIds);
-    lastAutoCommandScopeSignatureRef.current = visibleCommandScopeIds.join('\u001f');
-  }, [visibleCommandScopeIds]);
-  const focusCommandDispatch = React.useCallback(() => {
-    commandDispatchRef.current?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
-    });
-  }, []);
-  const toggleDroneCommandScope = React.useCallback((droneId) => {
-    const normalizedDroneId = normalizeComparableId(droneId);
-    if (!normalizedDroneId) {
-      return;
-    }
-
-    commandScopeAutoTracksVisibleRef.current = false;
-    const allDroneIds = drones
-      .map((drone) => normalizeComparableId(drone?.[FIELD_NAMES.HW_ID] || drone?.hw_ID))
-      .filter(Boolean);
-    const baseScopeIds = commandTargetMode === 'selected'
-      ? commandSelectedDrones.map((value) => String(value))
-      : commandTargetMode === 'cluster'
-        ? commandClusterTargetIds
-        : allDroneIds;
-    const baseScopeSet = new Set(baseScopeIds.map((value) => String(value)));
-
-    if (baseScopeSet.has(normalizedDroneId)) {
-      baseScopeSet.delete(normalizedDroneId);
-    } else {
-      baseScopeSet.add(normalizedDroneId);
-    }
-
-    const orderedNextScope = allDroneIds.filter((value) => baseScopeSet.has(value));
-    setCommandTargetMode('selected');
-    setCommandSelectedDrones(orderedNextScope);
-  }, [commandClusterTargetIds, commandSelectedDrones, commandTargetMode, drones]);
-
-  React.useEffect(() => {
-    if (commandTargetMode !== 'selected') {
-      return;
-    }
-
-    const validDroneIds = new Set(
-      drones
-        .map((drone) => normalizeComparableId(drone?.[FIELD_NAMES.HW_ID] || drone?.hw_ID))
-        .filter(Boolean),
-    );
-
-    setCommandSelectedDrones((prev) => prev.filter((value) => validDroneIds.has(String(value))));
-  }, [commandTargetMode, drones]);
-  React.useEffect(() => {
-    if (commandTargetMode !== 'cluster') {
-      return;
-    }
-
-    if (!clusterScopeOptions.some((option) => String(option.id) === String(commandClusterScope))) {
-      const fallbackCluster = clusterScopeOptions.find((option) => option.id !== 'all' && option.id !== 'attention');
-      setCommandClusterScope(fallbackCluster ? String(fallbackCluster.id) : '');
-    }
-  }, [clusterScopeOptions, commandClusterScope, commandTargetMode]);
-
-  const toggleFleetPanel = () => {
-    setFleetPanelExpanded((current) => !current);
+  const openMove = (item) => { inspect(null); setMore(null); setMoveTargets([item.id]); };
+  const openMore = (item = null) => {
+    const ids = item ? [item.id] : [...selection.ids];
+    inspect(null);
+    setMore({ ids, label: ids.slice(0, 2).map((id) => `${model.byId.get(id)?.label || 'Aircraft'} · H${id}`).join(', ')
+      + (ids.length > 2 ? ` · +${ids.length - 2}` : '') });
   };
-
-  const handleFleetPanelKeyDown = (event) => {
-    if (event.key !== 'Enter' && event.key !== ' ') {
-      return;
-    }
-
-    event.preventDefault();
-    toggleFleetPanel();
+  const moveItem = more?.ids.length === 1 ? model.byId.get(more.ids[0]) : null;
+  const canPrecisionMove = Boolean(moveItem?.current && moveItem.flightState === 'Airborne');
+  const removeUnavailable = ({ command, remainingIds }) => {
+    if (!remainingIds.length) return;
+    const { idempotency_key, recover, ...unsent } = command;
+    request(unsent, remainingIds);
   };
+  const renderTile = (item) => <AircraftTile key={item.id} item={item} list={view === 'list'} selected={selectedIds.has(item.id)} inspected={inspected?.id === item.id}
+    onInspect={inspect} onToggle={id => dispatch({ type: 'toggle', id })}
+    selectionDisabled={!selection.initialized || Boolean(intent || takeoff || more || moveTargets || choosingRecipients)} />;
 
-  return (
-    <PageShell
-      className="overview-container"
-      eyebrow="Operations dashboard"
-      title="Fleet Command"
-      subtitle="Live fleet status, dispatch scope, launch readiness."
-      icon={<FaBroadcastTower />}
-      docsRoute="/mission-control"
-      status={(
-        <StatusBadge tone={fleetSummary.online > 0 ? 'success' : 'warning'}>
-          {fleetSummary.online}/{fleetSummary.total} live
-        </StatusBadge>
-      )}
-    >
-      <section className="overview-header" aria-label="Fleet command summary">
-        <div
-          className={`overview-summary-panel ${fleetPanelExpanded ? 'is-open' : ''}`}
-          role="button"
-          tabIndex={0}
-          onClick={toggleFleetPanel}
-          onKeyDown={handleFleetPanelKeyDown}
-          aria-expanded={fleetPanelExpanded}
-          aria-label={fleetPanelExpanded ? 'Hide fleet details' : 'Show fleet details'}
-        >
-          <MetricStrip
-            className="overview-summary-strip"
-            label="Fleet overview"
-            items={[
-              { key: 'fleet', label: 'Fleet', value: fleetSummary.total },
-              { key: 'online', label: 'Online', value: fleetSummary.online, tone: fleetSummary.online > 0 ? 'success' : 'warning' },
-              { key: 'ready', label: 'Ready', value: fleetSummary.ready, tone: fleetSummary.ready === fleetSummary.total && fleetSummary.total > 0 ? 'success' : 'neutral' },
-              { key: 'armed', label: 'Armed', value: fleetSummary.armed, tone: fleetSummary.armed > 0 ? 'warning' : 'neutral' },
-            ]}
-          />
-          <div className={`overview-summary-toggle ${fleetPanelExpanded ? 'is-open' : ''}`} aria-hidden="true">
-            <span>{fleetPanelExpanded ? 'Details' : 'Summary'}</span>
-            <FaChevronDown className="overview-summary-toggle-icon" />
-          </div>
-          {fleetPanelExpanded && (
-            <div className="overview-summary-grid" role="list" aria-label="Expanded fleet overview">
-              <article className="overview-summary-card" role="listitem">
-                <span className="overview-summary-card__label">Visible drones</span>
-                <strong>{fleetSummary.total}</strong>
-                <small>Card wall</small>
-              </article>
-              <article className="overview-summary-card" role="listitem">
-                <span className="overview-summary-card__label">Online link</span>
-                <strong>{fleetSummary.online}</strong>
-                <small>{fleetSummary.degraded} delayed · {fleetSummary.unavailable} unavailable</small>
-              </article>
-              <article className="overview-summary-card" role="listitem">
-                <span className="overview-summary-card__label">Ready status</span>
-                <strong>{fleetSummary.ready}</strong>
-                <small>{fleetSummary.total - fleetSummary.ready} need review</small>
-              </article>
-              <article className="overview-summary-card" role="listitem">
-                <span className="overview-summary-card__label">Armed aircraft</span>
-                <strong>{fleetSummary.armed}</strong>
-                <small>{Math.max(fleetSummary.total - fleetSummary.armed, 0)} disarmed</small>
-              </article>
-            </div>
-          )}
-        </div>
-      </section>
-
-      <div
-        className="mission-trigger-section"
-        ref={commandDispatchRef}
-        id="command-dispatch"
-      >
-        <CommandSender
-          drones={drones}
-          runtimeMode={runtimeMode}
-          swarmData={swarmAssignments}
-          targetMode={commandTargetMode}
-          onTargetModeChange={handleCommandTargetModeChange}
-          selectedDrones={commandSelectedDrones}
-          onSelectedDronesChange={handleCommandSelectedDronesChange}
-          selectedClusterScope={commandClusterScope}
-          onSelectedClusterScopeChange={setCommandClusterScope}
-        />
-      </div>
-
-      <div className="connected-drones-header">
-        <div>
-          <h2>Fleet</h2>
-          <p>Filter the card wall, then apply the visible subset to dispatch when needed.</p>
-        </div>
-        <div className="connected-drones-header__actions">
-          <span className="connected-drones-count">
-            {filteredDrones.length}/{fleetSummary.total} card{fleetSummary.total === 1 ? '' : 's'} visible
-          </span>
-          <button
-            type="button"
-            className="connected-drones-scope"
-            aria-label="Jump to command dispatch scope controls"
-            onClick={focusCommandDispatch}
-            aria-controls="command-dispatch"
-          >
-            {commandScopeSummary}
-          </button>
-          <button
-            type="button"
-            className="connected-drones-action"
-            onClick={applyVisibleCardsToCommandScope}
-            disabled={visibleCommandScopeIds.length === 0 || visibleScopeMatchesSelection}
-            aria-label={visibleScopeMatchesSelection
-              ? 'The currently visible commandable fleet already matches the manual dispatch scope.'
-              : 'Copy currently visible online or delayed fleet cards into the manual dispatch scope.'}
-          >
-            {visibleScopeMatchesSelection ? 'Visible in dispatch' : 'Use visible'}
-          </button>
-        </div>
-      </div>
-
-      <div className="overview-fleet-toolbar">
-        <label className="overview-fleet-toolbar__search">
-          <span>Search fleet</span>
-          <input
-            type="search"
-            value={droneQuery}
-            onChange={(event) => setDroneQuery(event.target.value)}
-            placeholder={DRONE_SEARCH_PLACEHOLDER}
-            aria-label="Search fleet cards by position, hardware ID, or callsign"
-          />
-        </label>
-        <div className="overview-fleet-toolbar__filters" role="tablist" aria-label="Fleet card filters">
-          {[
-            ['active', 'Active'],
-            ['attention', 'Attention'],
-            ['ready', 'Ready'],
-            ['online', 'Online'],
-            ['armed', 'Armed'],
-            ['all', 'All'],
-          ].map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              className={`overview-fleet-toolbar__filter ${cardFilter === value ? 'active' : ''}`}
-              onClick={() => setCardFilter(value)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        {clusterScopeOptions.length > 1 && (
-          <ClusterScopeBar
-            label="Visible clusters"
-            options={clusterScopeOptions}
-            selectedId={clusterScope}
-            onSelect={setClusterScope}
-            summary="Top-leader scopes keep large fleets readable."
-          />
-        )}
-      </div>
-
-      {notification && (
-        <OperatorNotice tone="warning" title="Telemetry incomplete" className="overview-notice">
-          {notification}
-        </OperatorNotice>
-      )}
-      {error && (
-        <OperatorNotice tone="danger" title="Backend telemetry unavailable" className="overview-notice">
-          {error}
-        </OperatorNotice>
-      )}
-
-      <div className="drone-list">
-        {drones.length === 0 && !error && (
-          <EmptyState
-            className="overview-empty-state"
-            title="No valid drone data"
-            detail="When telemetry resumes, aircraft cards will populate here automatically."
-          />
-        )}
-        {drones.length > 0 && filteredDrones.length === 0 && !error && (
-          <EmptyState
-            className="overview-empty-state"
-            title="No drones match filters"
-            detail="Search supports free text and scoped queries like pos 1-5 or hw 2,4."
-          />
-        )}
-        {filteredDrones.map((drone) => (
-          <div
-            key={drone.hw_ID}
-            className="drone-list__item"
-            ref={(el) => droneRefs.current[drone.hw_ID] = el}
-          >
-            <DroneWidget
-              drone={drone}
-              isExpanded={expandedDrone && expandedDrone.hw_ID === drone.hw_ID}
-              toggleDroneDetails={toggleDroneDetails}
-              setSelectedDrone={setSelectedDrone}
-              commandScopeState={
-                commandTargetMode === 'all'
-                  ? 'all'
-                  : commandScopeSet.has(normalizeComparableId(drone?.[FIELD_NAMES.HW_ID] || drone?.hw_ID))
-                    ? (commandTargetMode === 'cluster' ? 'cluster' : 'selected')
-                    : 'out'
-              }
-              onToggleCommandScope={toggleDroneCommandScope}
-            />
-          </div>
-        ))}
-      </div>
-
-      {/* Expanded Drone Portal */}
-      <ExpandedDronePortal
-        drone={expandedDrone}
-        isOpen={!!expandedDrone}
-        onClose={closeExpandedDrone}
-        originRect={originRect}
-      />
-    </PageShell>
-  );
-};
-
-Overview.propTypes = {
-  setSelectedDrone: PropTypes.func.isRequired,
-  runtimeMode: PropTypes.oneOf(['real', 'sitl', 'unknown']),
-};
-
-export default Overview;
+  return <main className="fleet-overview" aria-label="Fleet overview">
+    <header className="fleet-overview__header"><div><span className="fleet-eyebrow">OPERATIONS</span><h1>Overview</h1></div>
+      <div className="fleet-status-strip" aria-label="Fleet status"><strong className={`fleet-runtime is-${runtimeMode}`}>{runtimeMode.toUpperCase()}</strong>
+        <span title={`${model.summary.available} available of ${model.summary.total} configured aircraft`} aria-label={`${model.summary.available} available of ${model.summary.total}`}><FaBroadcastTower aria-hidden="true" /> {model.summary.available}<small> / {model.summary.total}</small></span>
+        <span title={`${model.summary.airborne} airborne`} aria-label={`${model.summary.airborne} airborne`}><FaPlane aria-hidden="true" /> {model.summary.airborne}</span>
+        {model.summary.attention > 0 && <button type="button" className="tone-warning" title="Show aircraft needing attention" aria-label={`Show ${model.summary.attention} aircraft needing attention`}
+          onClick={() => setFilter(filter === 'attention' ? 'all' : 'attention')} aria-pressed={filter === 'attention'}>
+          <FaExclamationTriangle aria-hidden="true" /> {model.summary.attention}</button>}</div>
+    </header>
+    {attention.telemetry.active && <div role="alert" className="fleet-inline-warning">{attention.telemetry.phase === 'recovering'
+      ? 'GCS link recovering' : 'GCS telemetry unavailable · displayed measurements are aging. Reconnecting.'}</div>}
+    {attention.config.active && <div role="alert" className="fleet-inline-warning">{attention.config.phase === 'recovering'
+      ? 'Configuration link recovering' : 'Aircraft configuration could not refresh. Review targets before sending.'}</div>}
+    {storageWarning && <div role="status" className="fleet-inline-warning">{storageWarning}</div>}
+    {pending.length > 0 && <div role="alert" className="fleet-inline-warning"><details><summary>{pending.length} unconfirmed action{pending.length === 1 ? '' : 's'}</summary>
+      {pending.map((entry) => <button type="button" key={entry.storageKey} onClick={() => setIntent({ storageKey: entry.storageKey, command: { ...entry.command, recover: true } })}>
+        Check {getCommandName(entry.command.mission_type)} · {entry.command.target_drone_ids.length} aircraft</button>)}
+    </details></div>}
+    <section className="fleet-toolbar" aria-label="Aircraft display">
+      <label className="fleet-search"><span className="fleet-visually-hidden">Find aircraft</span><input type="search" placeholder="Find aircraft" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+      <label className="fleet-display-filter"><span title="Display only; command recipients are set beside the flight controls"><FaEye aria-hidden="true" /> Show</span><select aria-label="Show aircraft" value={filter} onChange={(event) => setFilter(event.target.value)}>
+        <option value="available">Available</option><option value="all">All aircraft</option><option value="selected">Command aircraft</option><option value="attention">Needs attention</option><option value="unavailable">Unavailable</option><option value="airborne">Airborne</option><option value="unmapped">No current position</option></select></label>
+      {hasMultipleGroups && view !== 'map' && <button type="button" className="fleet-group-toggle" title="Group display by cluster" aria-label="Group by cluster" aria-pressed={grouped} onClick={() => setGrouped(!grouped)}><FaLayerGroup aria-hidden="true" /></button>}
+      <div className="fleet-view-switch" role="group" aria-label="Aircraft view">{[['board', 'Board', FaBorderAll], ['list', 'List', FaList], ['map', 'Map', FaMapMarkedAlt]].map(([key, label, Icon]) =>
+        <button type="button" key={key} aria-label={label} title={`${label} view`} aria-pressed={view === key} onClick={() => chooseView(key)}><Icon aria-hidden="true" /></button>)}</div>
+    </section>
+    <div className="fleet-surface">
+      {resources.loading ? <p role="status">Loading aircraft…</p> : view === 'map' ? <Suspense fallback={<p role="status">Loading map…</p>}>
+        <FleetMap aircraft={visible} selectedIds={selectedIds} onInspect={inspect} onShowUnmapped={() => { chooseView('list'); setFilter('unmapped'); }} />
+      </Suspense> : <section aria-label="Aircraft">{displayGroups.map((group) => <React.Fragment key={group.id}>
+        {group.label && <h2 className="fleet-cluster-heading">{group.label}<small>{group.aircraft.length}</small></h2>}
+        <div className={`fleet-board ${view === 'list' ? 'fleet-board--list' : ''}`}>{group.aircraft.map(renderTile)}</div>
+      </React.Fragment>)}</section>}
+      {!resources.loading && !visible.length && <div className="fleet-empty"><h2>{model.summary.total ? 'No matching aircraft' : 'No configured aircraft'}</h2>
+        {model.summary.total ? <button type="button" onClick={() => { setFilter('all'); setQuery(''); }}>Clear filters</button> : <Link to="/fleet-enrollment">Set up aircraft →</Link>}</div>}
+    </div>
+    {more && <MoreActionsPanel targetCount={more.ids.length} targetLabel={more.label} runtimeMode={runtimeMode} referenceNowMs={clock.referenceNowMs}
+      onClose={() => setMore(null)} onSendCommand={(body) => request(body, more.ids)} canPrecisionMove={canPrecisionMove}
+      onRequestPrecisionMove={() => { if (canPrecisionMove) openMove(moveItem); }} />}
+    <footer className="fleet-action-rail" aria-label="Selected aircraft actions">
+      <CommandAircraftControl ids={selection.ids} aircraft={model.aircraft} review={review} map={view === 'map'}
+        disabled={!selection.initialized || Boolean(intent || takeoff || more || moveTargets)} onOpen={() => { inspect(null); setChoosingRecipients(true); }} onShowRecipients={showRecipients} />
+      <div className="fleet-action-rail__buttons">{PRIMARY.map(([key, label, Icon]) => <button key={key} type="button" disabled={!canAct} onClick={() => action(key)}
+        title={key === 'RETURN_RTL' ? 'Immediate PX4 RTL · no sequencing' : undefined}><Icon aria-hidden="true" /><span>{label}</span></button>)}
+        <button type="button" aria-label="More" title="More aircraft actions" aria-expanded={Boolean(more)} disabled={!canAct} onClick={() => openMore()}><FaEllipsisH aria-hidden="true" /></button></div>
+    </footer>
+    {choosingRecipients && <CommandAircraftPicker selectedIds={selection.ids} configuredIds={resources.configuredIds} aircraft={model.aircraft} groups={groups}
+      onClose={() => setChoosingRecipients(false)} onApply={ids => { dispatch({ type: 'group', ids }); setChoosingRecipients(false); }} />}
+    {inspected && !more && !intent && !takeoff && !moveTargets && <AircraftInspector item={inspected} onClose={() => inspect(null)} onAction={action} onMove={openMove} onMore={openMore} />}
+    {intent && <ActionReview key={`${intent.storageKey}:${intent.command.idempotency_key || 'review'}`} intent={intent.command} storageKey={intent.storageKey} runtimeMode={runtimeMode} aircraft={model.aircraft}
+      onClose={closeReview} onResolved={() => setPending(readPendingActions(pendingKey))} onRemoveUnavailable={removeUnavailable} />}
+    <TakeoffDialog open={Boolean(takeoff)} command={takeoff} aircraft={resources.drones} onClose={() => setTakeoff(null)} />
+    {moveTargets && <FleetMoveControl key={`${runtimeMode}:${operatorId}:${moveTargets[0]}`} targetId={moveTargets[0]}
+      targetLabel={model.byId.get(moveTargets[0])?.label} runtimeMode={runtimeMode} operatorId={operatorId} onClose={() => setMoveTargets(null)} />}
+  </main>;
+}

@@ -112,6 +112,15 @@ h1, h2, h3, h4, h5, h6 {
   margin-left: var(--sidebar-width-collapsed);
 }
 
+/* Persistent outcomes and condition history share one restrained shell row. */
+.shell-operations-strip { display:flex; gap:.5rem; align-items:start; min-width:0; margin-bottom:.65rem; }
+.shell-operations-strip > .command-activity { flex:1; }
+.shell-operations-strip > .fleet-alerts { flex:0 0 auto; margin:0; }
+@media(max-width:620px) {
+  .shell-operations-strip { align-items:stretch; gap:.3rem; }
+  .shell-operations-strip .command-activity__latest { display:none; }
+}
+
 .page-loading {
   min-height: calc(100vh - 2 * var(--spacing-lg));
   display: grid;
@@ -459,7 +468,7 @@ h1, h2, h3, h4, h5, h6 {
   align-items: center;
   justify-content: center;
   border: 1px solid var(--color-primary-border);
-  border-radius: 999px;
+  border-radius: 2px;
   background: color-mix(in srgb, var(--color-bg-secondary) 84%, transparent);
   color: var(--color-primary);
   box-shadow: var(--shadow-lg);
@@ -509,22 +518,13 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .route-docs-shortcut {
-  position: fixed;
-  top: 0.95rem;
-  right: 1rem;
-  z-index: var(--z-fixed);
+  flex: 0 0 auto;
 }
 
 .route-docs-shortcut .operator-docs-link {
-  box-shadow: var(--shadow-md);
-  backdrop-filter: blur(10px);
-}
-
-@media (max-width: 768px) {
-  .route-docs-shortcut {
-    top: 0.75rem;
-    right: 0.75rem;
-  }
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 2px;
 }
 
 /* Toast Notification Enhancements - Add to App.css */
@@ -684,13 +684,11 @@ h1, h2, h3, h4, h5, h6 {
   }
 }
 
-@media (min-width: 769px) {
-  .mobile-shell-controls,
-  .mobile-sidebar-toggle,
-  .sidebar-backdrop {
-    display: none;
-  }
-}
+/* App's viewport owner chooses drawer vs desktop. A second CSS breakpoint
+   used to hide the drawer trigger on 769–960px tablets. */
+.app-desktop .mobile-shell-controls,
+.app-desktop .mobile-sidebar-toggle,
+.app-desktop .sidebar-backdrop { display: none; }
 
 /* Accessibility */
 @media (prefers-reduced-motion: reduce) {

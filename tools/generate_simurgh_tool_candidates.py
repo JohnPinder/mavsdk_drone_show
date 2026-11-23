@@ -55,6 +55,18 @@ def canonicalize_openapi_schema(value: Any) -> Any:
         return int(value)
     return value
 MANUAL_UNSAFE_ROUTE_REASONS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("GET", "/api/logs/drone/{drone_id}/ulog/download-requests/{request_id}"): (
+        "actor-bound raw-download recovery may return a signed content handle; dashboard-only, not model evidence",
+    ),
+    ("GET", "/api/v1/px4-params/reviews/{review_id}"): (
+        "operator write-review state; use existing parameter snapshot read tools",
+    ),
+    ("GET", "/api/v1/px4-params/patch-jobs/by-idempotency/{idempotency_key}"): (
+        "browser request-key recovery is dashboard-scoped; use the reviewed patch-job ID read tool",
+    ),
+    ("POST", "/api/v1/shows/custom/preview"): (
+        "image regeneration writes show artifacts; dashboard-only maintenance action",
+    ),
     ("GET", "/api/v1/commands/lookup"): (
         "command identity lookup is not a stable operator evidence contract",
     ),

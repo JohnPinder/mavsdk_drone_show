@@ -1,10 +1,12 @@
 """Shared helpers for GCS drone-show management routes."""
 
 import csv
+import hashlib
 import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 import zipfile
 from datetime import datetime
@@ -13,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
 
+_CUSTOM_SHOW_PUBLISH_LOCK = threading.RLock()
 
 CUSTOM_SHOW_REQUIRED_COLUMNS = (
     "t", "px", "py", "pz",
@@ -57,8 +60,10 @@ def custom_show_csv_path(shapes_dir: str) -> str:
     return os.path.join(shapes_dir, "active.csv")
 
 
-def custom_show_preview_path(shapes_dir: str) -> str:
-    return os.path.join(shapes_dir, "trajectory_plot.png")
+def custom_show_preview_path(shapes_dir: str, theme: str = "light") -> str:
+    if theme not in {"light", "dark"}:
+        raise HTTPException(status_code=422, detail="Preview theme must be light or dark")
+    return os.path.join(shapes_dir, "trajectory_plot_dark.png" if theme == "dark" else "trajectory_plot.png")
 
 
 def inspect_custom_show_csv(csv_path: str) -> Dict[str, Any]:
@@ -174,8 +179,11 @@ def generate_custom_show_preview(points: List[Dict[str, float]], preview_path: s
     altitude_ax.grid(alpha=0.25)
 
     fig.suptitle("Custom CSV Preview", fontsize=14, fontweight="bold")
-    fig.savefig(preview_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    from functions.plot_drone_paths import save_plot_variants
+    try:
+        save_plot_variants(fig, preview_path, dpi=150, bbox_inches="tight")
+    finally:
+        plt.close(fig)
 
 
 def load_saved_metrics_if_current(
@@ -416,14 +424,25 @@ def build_custom_show_info_payload(shapes_dir: str) -> Dict[str, Any]:
     if not os.path.exists(csv_path):
         raise HTTPException(status_code=404, detail="Custom CSV not found")
 
+    before = os.stat(csv_path)
     inspected = inspect_custom_show_csv(csv_path)
+    digest = hashlib.sha256()
+    with open(csv_path, "rb") as csv_file:
+        for chunk in iter(lambda: csv_file.read(65536), b""):
+            digest.update(chunk)
+    after = os.stat(csv_path)
+    if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
+        raise HTTPException(status_code=409, detail="Custom CSV changed during inspection; refresh before review")
     return {
         "exists": True,
         "filename": "active.csv",
+        # Review identity only: the legacy type-3 command does not bind file bytes.
+        "sha256": digest.hexdigest(),
         "row_count": inspected["row_count"],
         "duration_sec": inspected["duration_sec"],
         "max_altitude": inspected["max_altitude"],
         "preview_exists": os.path.exists(preview_path),
+        "preview_themes": {theme: os.path.exists(custom_show_preview_path(shapes_dir, theme)) for theme in ("light", "dark")},
         "execution_mode": "local per-drone replay",
         "required_columns": list(CUSTOM_SHOW_REQUIRED_COLUMNS),
     }
@@ -447,11 +466,9 @@ def import_custom_show_csv(
 
     warnings: List[str] = []
     git_result: Optional[Dict[str, Any]] = None
-    temp_root = os.path.join(base_dir, "temp")
-    os.makedirs(temp_root, exist_ok=True)
     os.makedirs(shapes_dir, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="custom-show-import-", dir=temp_root) as staging_root:
+    with tempfile.TemporaryDirectory(prefix=".custom-show-import-", dir=shapes_dir) as staging_root:
         staged_csv_path = os.path.join(staging_root, "active.csv")
         staged_preview_path = os.path.join(staging_root, "trajectory_plot.png")
 
@@ -466,8 +483,15 @@ def import_custom_show_csv(
         if os.path.exists(active_csv_path):
             warnings.append("Existing active custom CSV was replaced.")
 
-        shutil.copy2(staged_csv_path, active_csv_path)
-        shutil.copy2(staged_preview_path, preview_path)
+        with _CUSTOM_SHOW_PUBLISH_LOCK:
+            os.replace(staged_csv_path, active_csv_path)
+            os.replace(staged_preview_path, preview_path)
+            staged_dark = custom_show_preview_path(staging_root, "dark")
+            active_dark = custom_show_preview_path(shapes_dir, "dark")
+            if os.path.exists(staged_dark):
+                os.replace(staged_dark, active_dark)
+            elif os.path.exists(active_dark):
+                os.unlink(active_dark)  # Never retain a dark image of the previous CSV.
 
         if git_auto_push:
             git_result = git_operations_func(
@@ -685,8 +709,23 @@ def list_show_plots_payload(plots_directory: str) -> Dict[str, Any]:
     return {"filenames": filenames, "variants": variants, "revision": revision, "uploadTime": upload_time}
 
 
-def resolve_custom_show_image_path(shapes_dir: str) -> str:
-    image_path = custom_show_preview_path(shapes_dir)
+def refresh_custom_show_preview(shapes_dir: str) -> Dict[str, Any]:
+    """Explicit image-only regeneration; never reimport or modify the flight CSV."""
+    with _CUSTOM_SHOW_PUBLISH_LOCK:
+        csv_path = custom_show_csv_path(shapes_dir)
+        if not os.path.isfile(csv_path):
+            raise HTTPException(status_code=404, detail="Custom CSV not found")
+        # Stage beside the destination so publication is atomic on the same device.
+        with tempfile.TemporaryDirectory(prefix=".custom-preview-", dir=shapes_dir) as staging:
+            inspected = inspect_custom_show_csv(csv_path)
+            generate_custom_show_preview(inspected["points"], custom_show_preview_path(staging))
+            for theme in ("light", "dark"):
+                os.replace(custom_show_preview_path(staging, theme), custom_show_preview_path(shapes_dir, theme))
+    return {"success": True, "preview_generated": True, "preview_themes": {"light": True, "dark": True}}
+
+
+def resolve_custom_show_image_path(shapes_dir: str, theme: str = "light") -> str:
+    image_path = custom_show_preview_path(shapes_dir, theme)
     if not os.path.exists(image_path):
-        raise HTTPException(status_code=404, detail=f"Custom show image not found at {image_path}")
+        raise HTTPException(status_code=404, detail="Custom show preview unavailable; refresh the preview in Design / Setup")
     return image_path

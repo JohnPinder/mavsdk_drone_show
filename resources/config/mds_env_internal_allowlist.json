@@ -41,6 +41,66 @@
   ],
   "keys": [
     {
+      "name": "MDS_UI_CHROME",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Chromium executable for isolated UI acceptance tooling; never persisted as an operator runtime setting."
+    },
+    {
+      "name": "MDS_UI_THEMES",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Synthetic theme matrix for isolated built-browser acceptance."
+    },
+    {
+      "name": "MDS_UI_WIDTHS",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Viewport widths for isolated built-browser acceptance, not aircraft configuration."
+    },
+    {
+      "name": "MDS_RUNTIME_PYTHON",
+      "domain": "runtime",
+      "scope": "process",
+      "reason": "Shell-local selected interpreter derived from the runtime manifest/venv; not an operator environment setting."
+    },
+    {
+      "name": "MDS_OVERVIEW_URL",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Served-build URL for the isolated, browser-fulfilled Overview acceptance runner; never persisted as runtime configuration."
+    },
+    {
+      "name": "MDS_OVERVIEW_OUTPUT",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Artifact directory for isolated Overview browser acceptance screenshots and summaries."
+    },
+    {
+      "name": "MDS_OVERVIEW_COUNTS",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Synthetic aircraft-count matrix for isolated Overview browser acceptance; does not create or command nodes."
+    },
+    {
+      "name": "MDS_OVERVIEW_WIDTHS",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Viewport-width matrix for isolated Overview browser acceptance."
+    },
+    {
+      "name": "MDS_OVERVIEW_THEMES",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Theme matrix for isolated Overview browser acceptance."
+    },
+    {
+      "name": "MDS_TAKEOFF_CONTEXT_FD",
+      "domain": "runtime",
+      "scope": "process",
+      "reason": "Inherited coordinated-Takeoff context descriptor supplied by the mission supervisor; never persist or expose as an operator setting."
+    },
+    {
       "name": "MDS_BORROW_MAVSDK_SERVER",
       "domain": "runtime",
       "scope": "process",
@@ -479,6 +539,36 @@
       "reason": "PX4 parameter profile directory."
     },
     {
+      "name": "MDS_PX4_PARAMETER_STATE_MAX_BYTES",
+      "domain": "px4",
+      "scope": "process",
+      "reason": "Expert GCS parameter receipt storage budget; documented in the PX4 Parameters guide, not a flight control."
+    },
+    {
+      "name": "MDS_PX4_PARAMETER_REVIEW_MAX_AGE_SEC",
+      "domain": "px4",
+      "scope": "process",
+      "reason": "Expert parameter review lifetime; native expected-value and disarm checks remain authoritative."
+    },
+    {
+      "name": "MDS_PX4_PARAMETER_OPERATION_STATE_DIR",
+      "domain": "px4",
+      "scope": "process",
+      "reason": "Host-local native parameter receipt directory; preserve replay evidence during maintenance."
+    },
+    {
+      "name": "MDS_PX4_PARAMETER_OPERATION_MAX_RECORDS",
+      "domain": "px4",
+      "scope": "process",
+      "reason": "Expert native parameter receipt admission limit; never evict uncertain operation identities automatically."
+    },
+    {
+      "name": "MDS_PX4_PARAMETER_OPERATION_MAX_BYTES",
+      "domain": "px4",
+      "scope": "process",
+      "reason": "Expert native parameter receipt disk budget; preserve headroom for SQLite transactions."
+    },
+    {
       "name": "MDS_QT_QPA_PLATFORM",
       "domain": "sitl",
       "scope": "launcher",
@@ -645,6 +735,30 @@
       "domain": "frontend",
       "scope": "test",
       "reason": "Browser executable selector for dashboard layout validation."
+    },
+    {
+      "name": "MDS_CHROMIUM_EXECUTABLE",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Explicit browser executable for fixture-only workspace validation and screenshot guides."
+    },
+    {
+      "name": "MDS_UI_BASE",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Built dashboard origin for isolated fixture-only UI checks."
+    },
+    {
+      "name": "MDS_UI_EVIDENCE",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Output directory for fixture-only UI evidence and screenshots."
+    },
+    {
+      "name": "MDS_UI_FIXTURE_ONLY",
+      "domain": "frontend",
+      "scope": "test",
+      "reason": "Mandatory opt-in to intercepted synthetic backend traffic; never an aircraft runtime setting."
     },
     {
       "name": "MDS_LAYOUT_OUTPUT",

@@ -19,13 +19,25 @@ import { ThemeProvider } from './contexts/ThemeContext';
 import { CommandActivityProvider } from './contexts/CommandActivityContext';
 import { MapProvider } from './contexts/MapContext';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { ObservationProvider } from './contexts/ObservationContext';
+import FleetObservationMonitor from './features/fleet-overview/FleetObservationMonitor';
 
 // Import design tokens first
 import './styles/DesignTokens.css';
+// Shared operator surfaces have one cascade order, independent of lazy routes.
+import './styles/MapCommon.css';
+import './styles/SearchBar.css';
+import './styles/IdentityDoctrineStrip.css';
+import './styles/MissionPlanning.css';
+import './styles/PrecisionMoveDialog.css';
+import './styles/TakeoffDialog.css';
 
 import SidebarMenu from './components/SidebarMenu';
 import RouteDocsShortcut from './components/RouteDocsShortcut';
 import SyncWarningBanner from './components/SyncWarningBanner';
+import CommandActivityPanel from './components/CommandActivityPanel';
+import { FleetAlertsProvider } from './features/fleet-overview/FleetAlertsContext';
+import FleetAlertsPanel from './features/fleet-overview/FleetAlertsPanel';
 import ErrorBoundary from './components/ErrorBoundary';
 import useGcsRuntimeStatus from './hooks/useGcsRuntimeStatus';
 
@@ -38,13 +50,11 @@ import './App.css';
 // Lazy loaded — heavy visualization pages (three.js, plotly, cytoscape, mapbox)
 const Overview = lazy(() => import('./pages/Overview'));
 const MissionConfig = lazy(() => import('./pages/MissionConfig'));
-const Detail = lazy(() => import('./components/DroneDetail'));
 const SwarmDesign = lazy(() => import('./pages/SwarmDesign'));
-const CustomShowPage = lazy(() => import('./pages/CustomShowPage'));
+const CustomShowWorkspace = lazy(() => import('./pages/CustomShowWorkspace'));
 const GlobeView = lazy(() => import('./pages/GlobeView'));
 const DroneShowWorkspace = lazy(() => import('./pages/DroneShowWorkspace'));
-const SwarmTrajectory = lazy(() => import('./pages/SwarmTrajectory'));
-const TrajectoryPlanning = lazy(() => import('./pages/TrajectoryPlanning'));
+const SwarmTrajectory = lazy(() => import('./pages/SwarmTrajectoryWorkspace'));
 const QuickScoutPage = lazy(() => import('./pages/QuickScoutPage'));
 const Px4ParametersPage = lazy(() => import('./pages/Px4ParametersPage'));
 const FleetEnrollmentPage = lazy(() => import('./pages/FleetEnrollmentPage'));
@@ -129,7 +139,6 @@ const AuthGate = ({ children }) => {
 };
 
 const AppShell = () => {
-  const [selectedDrone, setSelectedDrone] = useState(null);
   const [isMobile, setIsMobile] = useState(getIsMobileViewport);
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(getIsMobileViewport);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -174,12 +183,16 @@ const AppShell = () => {
   }`;
 
   return (
+    <ObservationProvider key={`${runtimeStatus.mode}:${auth.user?.id || auth.user?.username || 'session'}:${auth.role || ''}`}>
+    <CommandActivityProvider>
     <Router
       future={{
         v7_startTransition: true,
         v7_relativeSplatPath: true,
       }}
     >
+      <FleetAlertsProvider key={`${runtimeStatus.mode}:${auth.user?.id || auth.user?.username || 'session'}`}>
+              <FleetObservationMonitor />
               <div className={`app-container ${isMobile ? 'app-mobile' : 'app-desktop'}`}>
                 {isMobile && (
                   <>
@@ -215,30 +228,28 @@ const AppShell = () => {
                   onChangePassword={auth.changePassword}
                 />
                 <div className={contentClassName}>
-                  <RouteDocsShortcut />
                   <SyncWarningBanner />
+                  <div className="shell-operations-strip"><CommandActivityPanel /><FleetAlertsPanel /><RouteDocsShortcut /></div>
                   <Suspense fallback={<AppLoadingFallback />}>
                     <Routes>
                       {/* Main drone management routes */}
-                      <Route path="/drone-show" element={<DroneShowWorkspace />} />
-                      <Route path="/drone-show-design" element={<DroneShowWorkspace />} />
+                      <Route path="/drone-show" element={<DroneShowWorkspace runtimeMode={runtimeStatus.mode} />} />
+                      <Route path="/drone-show-design" element={<DroneShowWorkspace runtimeMode={runtimeStatus.mode} />} />
                       <Route path="/swarm-design" element={<SwarmDesign />} />
                       <Route path="/mission-config" element={<MissionConfig />} />
                       <Route path="/fleet-enrollment" element={<FleetEnrollmentPage />} />
                       <Route path="/fleet-ops" element={<FleetOpsPage />} />
                       <Route path="/fleet-ops/wifi" element={<FleetOpsWifiPage />} />
                       <Route path="/fleet-ops/mavlink" element={<FleetOpsMavlinkPage />} />
-                      <Route path="/drone-detail" element={selectedDrone
-                        ? <Detail drone={selectedDrone} goBack={() => setSelectedDrone(null)} />
-                        : <Navigate to="/" replace />} />
-                      <Route path="/manage-drone-show" element={<DroneShowWorkspace />} />
-                      <Route path="/custom-show" element={<CustomShowPage />} />
+                      <Route path="/drone-detail" element={<Navigate to="/" replace />} />
+                      <Route path="/manage-drone-show" element={<DroneShowWorkspace runtimeMode={runtimeStatus.mode} />} />
+                      <Route path="/custom-show" element={<CustomShowWorkspace runtimeMode={runtimeStatus.mode} />} />
                       <Route path="/globe-view" element={<GlobeView />} />
                       <Route path="/swarm-trajectory" element={<SwarmTrajectory />} />
-                      <Route path="/px4-parameters" element={<Px4ParametersPage />} />
+                      <Route path="/px4-parameters" element={<Px4ParametersPage runtimeMode={runtimeStatus.mode} operatorId={auth.user?.id || auth.user?.username || ''} />} />
 
-                      {/* Advanced Route Editor retained for lower-level trajectory authoring */}
-                      <Route path="/trajectory-planning" element={<TrajectoryPlanning />} />
+                      {/* Existing bookmarks resolve to the single mission authoring workspace. */}
+                      <Route path="/trajectory-planning" element={<Navigate to="/swarm-trajectory?tab=plan" replace />} />
 
                       {/* QuickScout SAR */}
                       <Route path="/quickscout" element={<QuickScoutPage />} />
@@ -247,14 +258,14 @@ const AppShell = () => {
                       <Route path="/runtime-admin" element={<RuntimeAdminPage />} />
                       <Route path="/environments" element={<EnvironmentsPage />} />
                       <Route path="/simurgh" element={<SimurghOperatorPage />} />
-                      <Route path="/logs" element={<LogViewer />} />
+                      <Route path="/logs" element={<LogViewer runtimeMode={runtimeStatus.mode} operatorId={auth.user?.id || auth.user?.username || ''} userRole={auth.role || 'viewer'} />} />
                       <Route path="/sitl-control" element={<SitlControlPage />} />
 
                       {/* Backward-compatible alias used by workflow guidance */}
-                      <Route path="/mission-control" element={<Overview setSelectedDrone={setSelectedDrone} runtimeMode={runtimeStatus.mode} />} />
+                      <Route path="/mission-control" element={<Overview runtimeMode={runtimeStatus.mode} operatorId={auth.user?.id || auth.user?.username || ''} />} />
 
                       {/* Default route */}
-                      <Route path="/" element={<Overview setSelectedDrone={setSelectedDrone} runtimeMode={runtimeStatus.mode} />} />
+                      <Route path="/" element={<Overview runtimeMode={runtimeStatus.mode} operatorId={auth.user?.id || auth.user?.username || ''} />} />
                     </Routes>
                   </Suspense>
                 </div>
@@ -276,22 +287,28 @@ const AppShell = () => {
                 bodyClassName="toast-body"
                 progressClassName="toast-progress"
               />
+      </FleetAlertsProvider>
     </Router>
+    </CommandActivityProvider>
+    </ObservationProvider>
   );
+};
+
+const AuthenticatedWorkspace = () => {
+  const auth = useAuth();
+  return <ObservationProvider key={`${auth.user?.id || auth.user?.username || 'session'}:${auth.role || ''}`}><AppShell /></ObservationProvider>;
 };
 
 const App = () => (
   <ThemeProvider>
     <ErrorBoundary>
-      <CommandActivityProvider>
         <MapProvider>
           <AuthProvider>
             <AuthGate>
-              <AppShell />
+              <AuthenticatedWorkspace />
             </AuthGate>
           </AuthProvider>
         </MapProvider>
-      </CommandActivityProvider>
     </ErrorBoundary>
   </ThemeProvider>
 );

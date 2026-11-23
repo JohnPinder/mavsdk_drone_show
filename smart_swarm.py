@@ -32,9 +32,10 @@ import psutil
 import argparse
 from typing import Optional
 from collections import namedtuple
-from mavsdk import System
-from mavsdk.offboard import VelocityBodyYawspeed, VelocityNedYaw, OffboardError
-from mavsdk.action import ActionError
+from src.mavsdk_runtime import udp_listen_url
+from mavsdk_grpc import System
+from mavsdk_grpc.offboard import VelocityBodyYawspeed, VelocityNedYaw, OffboardError
+from mavsdk_grpc.action import ActionError
 from tenacity import retry, stop_after_attempt, wait_fixed
 import numpy as np  # Added for numerical computations
 
@@ -55,9 +56,15 @@ from src.smart_swarm_contract import normalize_topology, topology_revision
 from smart_swarm_src.control_authority import ControlAuthority
 from smart_swarm_src.session_runtime import SwarmSessionRuntime
 from smart_swarm_src.formation_acknowledgement import effective_revision
+from smart_swarm_src.config_transport import FormationSubscription
+from smart_swarm_src.leader_transport import LeaderStateSupervisor, LeaderTransportPolicy
 import aiohttp 
 
-from smart_swarm_src.leader_motion import project_leader_motion
+from smart_swarm_src.leader_motion import (
+    leader_heading_rate_deg_s,
+    project_leader_heading,
+    project_leader_motion,
+)
 from smart_swarm_src.leader_recovery import LeaderRecoveryWindow
 from smart_swarm_src.failover import choose_leader_loss_response
 from smart_swarm_src.assignment_recovery import LocalRecoveryOverride, recovery_assignment
@@ -133,6 +140,7 @@ LAST_LEADER_SAMPLE_REJECTION_CODE = None
 last_election_time = 0.0
 FORMATION_CONFIG_VERSION = 0
 LEADER_STREAM_TARGET_VERSION = 0
+LEADER_STREAM_TARGET_CHANGED = asyncio.Event()
 
 
 # ----------------------------- #
@@ -250,28 +258,11 @@ def should_use_local_ned(sample: dict) -> bool:
 
 
 def estimate_yaw_rate_deg_s(sample: dict, measurement_time: float) -> float:
-    """Prefer streamed yaw-rate, otherwise estimate it from successive samples."""
-    streamed = sample.get("yaw_rate_deg_s", None)
-    if streamed is not None:
-        try:
-            if math.isfinite(float(streamed)):
-                return float(streamed)
-        except (TypeError, ValueError):
-            pass
-
-    previous_yaw = LEADER_STATE.get("yaw")
-    previous_time = LEADER_STATE.get("attitude_timestamp_ms")
-    current_yaw = float(sample.get("yaw_deg", sample.get("yaw", 0.0)))
-
-    if previous_yaw is None or previous_time is None:
-        return 0.0
-
-    dt = (float(sample['attitude_timestamp_ms']) - previous_time) / 1000.0
-    if dt <= 0:
-        return 0.0
-
-    delta = (current_yaw - previous_yaw + 180.0) % 360.0 - 180.0
-    return delta / dt
+    """Use the attitude source clock, never the compatibility arrival-time argument."""
+    return leader_heading_rate_deg_s(
+        sample, LEADER_STATE,
+        max_sample_interval_s=float(Params.SMART_SWARM_SOURCE_MAX_AGE_SEC),
+    )
 
 
 def build_leader_measurement_from_sample(sample: dict):
@@ -452,6 +443,7 @@ def assign_leader_target(new_leader_hw_id):
         if target_changed:
             LEADER_STREAM_TARGET_VERSION += 1
             reset_leader_tracking()
+            LEADER_STREAM_TARGET_CHANGED.set()
         return None
 
     leader_cfg = get_drone_config_for_hw_id(normalized)
@@ -465,6 +457,7 @@ def assign_leader_target(new_leader_hw_id):
     if target_changed:
         LEADER_STREAM_TARGET_VERSION += 1
         reset_leader_tracking()
+        LEADER_STREAM_TARGET_CHANGED.set()
     return leader_cfg
 
 
@@ -917,7 +910,7 @@ def start_mavsdk_server(udp_port: int):
 
         # Start the MAVSDK server
         mavsdk_server = subprocess.Popen(
-            [mavsdk_server_path, "-p", str(Params.DEFAULT_GRPC_PORT), f"udp://:{udp_port}"],
+            [mavsdk_server_path, "-p", str(Params.DEFAULT_GRPC_PORT), udp_listen_url(udp_port)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
@@ -986,30 +979,10 @@ def wait_for_port(port, host='localhost', timeout=Params.PRE_FLIGHT_TIMEOUT):
             time.sleep(0.1)
 
 async def log_mavsdk_output(mavsdk_server):
-    """
-    Asynchronously logs the stdout and stderr of the MAVSDK server.
+    """Drain both native streams concurrently with their declared severity."""
+    from src.mavsdk_server_logging import drain_mavsdk_output
+    await drain_mavsdk_output(mavsdk_server, logging.getLogger(__name__))
 
-    Args:
-        mavsdk_server (subprocess.Popen): The subprocess running the MAVSDK server.
-    """
-    logger = logging.getLogger(__name__)
-    try:
-        while True:
-            line = await asyncio.get_event_loop().run_in_executor(None, mavsdk_server.stdout.readline)
-            if not line:
-                break
-            logger.debug(f"MAVSDK Server: {line.decode().strip()}")
-    except Exception:
-        logger.exception("Error while reading MAVSDK server stdout")
-
-    try:
-        while True:
-            line = await asyncio.get_event_loop().run_in_executor(None, mavsdk_server.stderr.readline)
-            if not line:
-                break
-            logger.error(f"MAVSDK Server Error: {line.decode().strip()}")
-    except Exception:
-        logger.exception("Error while reading MAVSDK server stderr")
 
 def stop_mavsdk_server(mavsdk_server, timeout_sec: float = 5.0):
     """
@@ -1040,7 +1013,7 @@ def stop_mavsdk_server(mavsdk_server, timeout_sec: float = 5.0):
 
 async def update_swarm_config_periodically(drone):
     """
-    Periodically fetches the swarm configuration from the GCS API endpoint and updates
+    Watches/reconciles the GCS configuration and serially updates
     global parameters such as role, formation offsets, and leader information.
 
     If a role change is detected (e.g., switching from follower to leader or vice versa),
@@ -1059,29 +1032,30 @@ async def update_swarm_config_periodically(drone):
         logger.error(f"[Periodic Update] Cannot resolve drone config for HW_ID={HW_ID}")
         return
 
-    # Shared session for connection reuse
-    async with aiohttp.ClientSession() as session:
-        while True:
+    subscription = FormationSubscription(
+        f"http://{Params.GCS_IP}:{Params.gcs_api_port}{GCS_CONFIG_SWARM_ROUTE}",
+        gcs_auth_headers(),
+        fallback_sec=Params.SMART_SWARM_CONFIG_REFRESH_INTERVAL_SEC,
+        reconcile_sec=Params.SMART_SWARM_CONFIG_RECONCILE_INTERVAL_SEC,
+        request_timeout_sec=Params.SMART_SWARM_GCS_CONFIG_TIMEOUT_SEC,
+        backoff_max_sec=Params.SMART_SWARM_CONFIG_BACKOFF_MAX_SEC,
+    )
+    async with subscription.run():
+        async for entries in subscription.updates():
             try:
                 if LEADER_FAILOVER_IN_PROGRESS:
                     await asyncio.sleep(0.25)
                     continue
-                logger.debug("[Periodic Update] Checking swarm configuration")
-                refreshed = await refresh_swarm_config_from_gcs(
-                    logger,
-                    source_label="periodic update",
-                    session=session,
-                )
-                if not refreshed:
-                    await asyncio.sleep(Params.SMART_SWARM_CONFIG_REFRESH_INTERVAL_SEC)
-                    continue
+                incoming = parse_swarm_entries(normalize_topology(entries))
+                if RECOVERY_OVERRIDE.assignment is not None and str_hw_id in incoming:
+                    incoming[str_hw_id] = RECOVERY_OVERRIDE.resolve(incoming[str_hw_id])
+                replace_swarm_config(list(incoming.values()), "GCS formation subscription")
 
                 # Grab this drone's new config
                 new_cfg = SWARM_CONFIG.get(str(HW_ID))
                 if new_cfg is None:
                     logger.error(f"[Periodic Update] No swarm entry for HW_ID={HW_ID}")
                 else:
-                    publish_runtime_assignment(new_cfg)
                     config_changed = False
                     # Determine new role/offsets/frame
                     new_offsets     = {
@@ -1105,10 +1079,16 @@ async def update_swarm_config_periodically(drone):
                         if new_is_leader:
                             await transition_to_leader_mode(drone, logger, "config update")
                         else:
+                            # No follower controller exists yet: install the complete
+                            # reference before any new controller task can execute.
+                            OFFSETS.update(new_offsets)
+                            FRAME = new_frame
                             await transition_to_follower_mode(drone, new_leader, logger, "config update")
                     elif not new_is_leader and _follower_task_missing('control_task'):
                         # A role change can wait behind a leader action. Retry
                         # against the latest assignment, not a stale queued one.
+                        OFFSETS.update(new_offsets)
+                        FRAME = new_frame
                         await transition_to_follower_mode(drone, new_leader, logger, "pending role change")
 
                     # Handle leader change if drone is a follower
@@ -1143,12 +1123,13 @@ async def update_swarm_config_periodically(drone):
 
                     if config_changed:
                         bump_formation_config_version("swarm config update")
+                    # This is effective-state telemetry, never a desired-state receipt.
+                    publish_runtime_assignment()
 
             except Exception as e:
                 logger.exception(f"[Periodic Update] Error fetching/updating swarm config: {e}")
 
-            # Wait before next poll
-            await asyncio.sleep(Params.SMART_SWARM_CONFIG_REFRESH_INTERVAL_SEC)
+            # The subscription owns retries, reconnects and bounded HTTP fallback.
 
 
 
@@ -1157,127 +1138,24 @@ async def update_swarm_config_periodically(drone):
 # ----------------------------- #
 
 async def update_leader_state():
-    """
-    Maintain leader state using the dedicated Smart Swarm stream with HTTP fallback.
-    """
-    logger = logging.getLogger(__name__)
-    global leader_unreachable_count, max_unreachable_attempts
-
-    def state_url(target_ip: str) -> str:
-        return f"http://{target_ip}:{Params.drone_api_port}{DRONE_SWARM_STATE_ROUTE}"
-
-    def ws_url(target_ip: str) -> str:
-        return f"http://{target_ip}:{Params.drone_api_port}{DRONE_WS_SWARM_STATE_ROUTE}".replace("http://", "ws://", 1)
-
-    async def consume_http_fallback(window_sec: float, target_version: int, target_hw_id: str | None, target_ip: str) -> None:
-        global leader_unreachable_count
-        poll_interval = 1.0 / max(1.0, float(Params.SMART_SWARM_HTTP_FALLBACK_RATE_HZ))
-        end_time = time.monotonic() + max(window_sec, poll_interval)
-        timeout = aiohttp.ClientTimeout(
-            total=float(Params.SMART_SWARM_LEADER_STATE_TIMEOUT_SEC)
-        )
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            while time.monotonic() < end_time:
-                if leader_stream_target_changed(target_version, target_hw_id, target_ip):
-                    logger.info(
-                        "Leader fallback target changed from %s@%s to %s@%s; reconnecting.",
-                        target_hw_id,
-                        target_ip,
-                        LEADER_HW_ID,
-                        LEADER_IP,
-                    )
-                    return
-                try:
-                    async with session.get(state_url(target_ip)) as response:
-                        if response.status != 200:
-                            raise aiohttp.ClientResponseError(
-                                response.request_info,
-                                response.history,
-                                status=response.status,
-                                message=f"Leader swarm-state fetch failed with HTTP {response.status}",
-                                headers=response.headers,
-                            )
-                        data = await response.json()
-                    applied = apply_leader_state_sample(data, "http-fallback")
-                    if not applied:
-                        leader_unreachable_count += 1
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    leader_unreachable_count += 1
-                    logger.debug(
-                        "Leader fallback fetch failed (%s/%s): %s",
-                        leader_unreachable_count,
-                        max_unreachable_attempts,
-                        exc,
-                    )
-                if leader_unreachable_count >= max_unreachable_attempts and DRONE_INSTANCE is not None:
-                    logger.warning(
-                        "Leader fallback path degraded for %s attempts; the control loop will hold zero and own failover timing.",
-                        leader_unreachable_count,
-                    )
-                await asyncio.sleep(poll_interval)
-
-    use_stream = bool(getattr(Params, "SMART_SWARM_USE_REALTIME_STREAM", True))
-    use_http_fallback = bool(getattr(Params, "SMART_SWARM_ENABLE_HTTP_FALLBACK", True))
-    connect_timeout = float(getattr(Params, "SMART_SWARM_STREAM_CONNECT_TIMEOUT_SEC", 3.0))
-    backoff = float(getattr(Params, "SMART_SWARM_STREAM_BACKOFF_INITIAL_SEC", 0.25))
-    max_backoff = float(getattr(Params, "SMART_SWARM_STREAM_BACKOFF_MAX_SEC", 2.0))
-
-    while True:
-        target_version, target_hw_id, target_ip = current_leader_stream_target()
-        if not target_ip:
-            await asyncio.sleep(backoff)
-            continue
-        if use_stream:
-            try:
-                timeout = aiohttp.ClientTimeout(total=None, sock_connect=connect_timeout, sock_read=None)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.ws_connect(ws_url(target_ip), heartbeat=15) as websocket:
-                        logger.info("Connected to leader Smart Swarm stream at %s", ws_url(target_ip))
-                        leader_unreachable_count = 0
-                        backoff = float(getattr(Params, "SMART_SWARM_STREAM_BACKOFF_INITIAL_SEC", 0.25))
-
-                        async for message in websocket:
-                            if leader_stream_target_changed(target_version, target_hw_id, target_ip):
-                                logger.info(
-                                    "Leader stream target changed from %s@%s to %s@%s; reconnecting.",
-                                    target_hw_id,
-                                    target_ip,
-                                    LEADER_HW_ID,
-                                    LEADER_IP,
-                                )
-                                break
-                            if message.type == aiohttp.WSMsgType.TEXT:
-                                data = message.json()
-                                if isinstance(data, dict) and data.get("error"):
-                                    logger.debug("Leader stream returned error payload: %s", data)
-                                    continue
-                                apply_leader_state_sample(data, "ws")
-                            elif message.type == aiohttp.WSMsgType.ERROR:
-                                raise websocket.exception() or RuntimeError("leader websocket closed with error")
-                            elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING):
-                                raise RuntimeError("leader websocket closed")
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                leader_unreachable_count += 1
-                logger.warning(
-                    "Leader Smart Swarm stream unavailable (%s/%s): %s",
-                    leader_unreachable_count,
-                    max_unreachable_attempts,
-                    exc,
-                )
-        if use_http_fallback:
-            await consume_http_fallback(backoff, target_version, target_hw_id, target_ip)
-        elif leader_unreachable_count >= max_unreachable_attempts and DRONE_INSTANCE is not None:
-            logger.warning(
-                "Leader stream unavailable for %s attempts with no HTTP fallback; the control loop will own failover timing.",
-                leader_unreachable_count,
-            )
-
-        await asyncio.sleep(backoff)
-        backoff = min(max_backoff, max(backoff * 2.0, float(getattr(Params, "SMART_SWARM_STREAM_BACKOFF_INITIAL_SEC", 0.25))))
+    """Acquire motion independently of the control loop's unchanged safety policy."""
+    supervisor = LeaderStateSupervisor(
+        current_leader_stream_target,
+        LEADER_STREAM_TARGET_CHANGED,
+        apply_leader_state_sample,
+        LeaderTransportPolicy(
+            port=Params.drone_api_port,
+            poll_interval=1.0 / max(1.0, float(Params.SMART_SWARM_HTTP_FALLBACK_RATE_HZ)),
+            request_timeout=float(Params.SMART_SWARM_LEADER_STATE_TIMEOUT_SEC),
+            connect_timeout=float(Params.SMART_SWARM_STREAM_CONNECT_TIMEOUT_SEC),
+            sample_idle_timeout=float(Params.SMART_SWARM_SOURCE_MAX_AGE_SEC),
+            backoff_initial=float(Params.SMART_SWARM_STREAM_BACKOFF_INITIAL_SEC),
+            backoff_max=float(Params.SMART_SWARM_STREAM_BACKOFF_MAX_SEC),
+            stream_enabled=bool(Params.SMART_SWARM_USE_REALTIME_STREAM),
+            http_enabled=bool(Params.SMART_SWARM_ENABLE_HTTP_FALLBACK),
+        ),
+    )
+    await supervisor.run()
 
         
 async def elect_new_leader():
@@ -1734,7 +1612,9 @@ async def control_loop(drone: System):
             leader_vel_n = predicted_state[3]
             leader_vel_e = predicted_state[4]
             leader_vel_d = predicted_state[5]
-            leader_yaw = LEADER_STATE.get('yaw', 0.0)
+            leader_yaw = project_leader_heading(
+                LEADER_STATE, now_s=current_time,
+                max_prediction_s=float(Params.SMART_SWARM_STREAM_PREDICT_GRACE_SEC))
             leader_yaw_rate_deg_s = LEADER_STATE.get('yaw_rate_deg_s', 0.0)
 
             if FRAME == "body":
@@ -1968,7 +1848,7 @@ async def initialize_drone(start_offboard: bool = False):
 
         # Create the drone system
         drone = System(mavsdk_server_address=mavsdk_server_address, port=Params.DEFAULT_GRPC_PORT)
-        await drone.connect(system_address=f"udp://:{Params.mavsdk_port}")
+        await drone.connect(system_address=udp_listen_url(Params.mavsdk_port))
 
         logger.info(
             f"Connecting to drone via MAVSDK server at {mavsdk_server_address}:{Params.DEFAULT_GRPC_PORT} on UDP port {Params.mavsdk_port}."

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, memo } from 'react';
 import PropTypes from 'prop-types';
 import DroneGitStatus from './DroneGitStatus';
+import { ConfirmDialog } from './ui';
 import { toast } from 'react-toastify';
 import {
   FaCheckCircle,
@@ -25,7 +26,6 @@ import {
   formatDroneLabel,
   formatShowSlotLabel,
   findDuplicatePositionAssignment,
-  getHeartbeatTimestamp,
   isPositiveIntegerId,
   normalizeComparableId,
   normalizeRuntimeIp,
@@ -47,7 +47,7 @@ import {
   serializeMissionConfigFormState,
   validateMissionCustomFields,
 } from '../utilities/missionConfigFields';
-import { buildMissionSlotStatusPresentation } from '../utilities/missionSlotStatus';
+import { buildMissionSlotStatusPresentation, getMissionSlotEvidence } from '../utilities/missionSlotStatus';
 import { getPlotThemeColors } from '../utilities/plotThemeColors';
 import '../styles/DroneConfigCard.css';
 
@@ -692,10 +692,9 @@ const DroneReadOnlyView = memo(function DroneReadOnlyView({
           </div>
         </div>
         <div className="card-actions">
-          <div className={`status-badge ${heartbeatStatusClass}`}>
+          <div className={`status-badge ${heartbeatStatusClass}`} title={heartbeatAgeSec !== null ? `Last heartbeat ${heartbeatAgeSec}s ago` : undefined}>
             {getHeartbeatIcon()}
             <span className="status-text">{heartbeatStatus}</span>
-            {heartbeatAgeSec !== null && <span className="status-time">({heartbeatAgeSec}s)</span>}
           </div>
         </div>
       </div>
@@ -712,14 +711,13 @@ const DroneReadOnlyView = memo(function DroneReadOnlyView({
                 className={`operator-indicator operator-indicator--${indicator.tone}${activeInspector === indicator.key ? ' is-active' : ''}`}
                 onClick={() => toggleInspector(indicator.key)}
                 aria-expanded={activeInspector === indicator.key}
-                data-help={indicator.title}
+                data-help={`${indicator.title} ${indicator.note || ''}`.trim()}
               >
                 <span className="operator-indicator__topline">
                   <IndicatorIcon className="operator-indicator__icon" />
                   <span className="operator-indicator__label">{indicator.label}</span>
                 </span>
                 <span className="operator-indicator__value">{indicator.value}</span>
-                <span className="operator-indicator__note">{indicator.note}</span>
               </button>
             );
           })}
@@ -728,7 +726,6 @@ const DroneReadOnlyView = memo(function DroneReadOnlyView({
           <div className="drone-card-details-rail">
             <div className="drone-card-details-rail__header">
               <strong>{inspectorButtons.find((indicator) => indicator.key === activeInspector)?.label || 'Details'}</strong>
-              <span>Tap the same indicator again to collapse.</span>
             </div>
             <div className="drone-card-details-rail__content">
               {renderActiveInspectorPanel()}
@@ -776,9 +773,7 @@ function buildHeartbeatPresencePresentation(heartbeatData, heartbeatAgeSec) {
     ? heartbeatData.presence
     : null;
   const presenceState = String(presence?.state || heartbeatData?.presence_state || '').trim().toLowerCase();
-  const ageSec = Number.isFinite(Number(presence?.heartbeat_age_sec ?? heartbeatData?.heartbeat_age_sec))
-    ? Number(presence?.heartbeat_age_sec ?? heartbeatData?.heartbeat_age_sec)
-    : heartbeatAgeSec;
+  const ageSec = heartbeatAgeSec;
 
   const longOffline = Boolean(presence?.long_offline);
   const byState = {
@@ -789,7 +784,10 @@ function buildHeartbeatPresencePresentation(heartbeatData, heartbeatAgeSec) {
     offline: { label: longOffline ? 'Long offline' : 'Offline', statusClass: 'offline', cardClass: 'status-offline' },
     never_seen: { label: 'Never seen', statusClass: 'unknown', cardClass: 'status-unknown' },
   };
-  if (byState[presenceState]) {
+  const liveSec = presence?.thresholds?.live_sec ?? 20;
+  const snapshotExpired = ['live', 'blocked'].includes(presenceState)
+    && ageSec !== null && ageSec > liveSec;
+  if (byState[presenceState] && !snapshotExpired) {
     return {
       ...byState[presenceState],
       ageSec,
@@ -1047,49 +1045,20 @@ const DroneEditForm = memo(function DroneEditForm({
 
   return (
     <>
-      {showPosChangeDialog && (
-        <div className="confirmation-dialog-backdrop">
-          <div className="confirmation-dialog" role="dialog" aria-modal="true">
-            <h4>Confirm Show Slot Change</h4>
-            <p>
-              You are changing the assigned show slot from <strong>{originalPosId}</strong> to{' '}
-              <strong>{currentPosId}</strong>.
-            </p>
-            <p>
-              This changes which trajectory file the drone will fly. Show slots are loaded from trajectory CSV files.
-            </p>
-            <p>
-              If a different spare airframe is taking over this slot, use Fleet Enrollment → Replace existing slot instead of editing the slot here.
-            </p>
-            <p className="confirmation-dialog__prompt">Do you want to proceed?</p>
-            <div className="dialog-buttons">
-              <button className="confirm-button" onClick={handleConfirmPosChange}>
-                Yes
-              </button>
-              <button className="cancel-button" onClick={handleCancelPosChange}>
-                No
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog open={showPosChangeDialog} title="Change show slot" appearance="console"
+        message={<><p>Slot <strong>{originalPosId} → {currentPosId}</strong></p><p>This selects a different show trajectory, not a replacement aircraft.</p></>}
+        confirmLabel="Apply slot" onConfirm={handleConfirmPosChange} onCancel={handleCancelPosChange} />
 
       <div className="drone-edit-form">
         <div className="form-header">
-          <div className="form-header-kicker">Edit Mission Assignment</div>
+          <div className="form-header-kicker">Edit aircraft</div>
           <h3>{`${formatDroneLabel(currentHwId, 'New Drone')} · ${formatShowSlotLabel(currentPosId, 'Show Slot Unassigned')}`}</h3>
-          <p className="form-header-copy">
-            Hardware ID stays with the physical drone. Position ID selects the show slot and trajectory file. Smart Swarm follow-links still use Hardware ID.
-          </p>
         </div>
 
         {/* Form Section */}
         <div className="form-section">
           <div className="form-section-block">
             <div className="form-section-title">Identity Assignment</div>
-            <div className="form-section-description">
-              Keep Hardware ID tied to the physical drone. Change Position ID only when this drone must fly a different slot.
-            </div>
             <div className="form-grid">
               <div className="form-field">
                 <label className="form-label" htmlFor={hwIdInputId}>
@@ -1546,14 +1515,11 @@ export default function DroneConfigCard({
 
   // Safely handle heartbeat data
   const safeHb = heartbeatData || {};
-  const heartbeatIp = normalizeRuntimeIp(safeHb.ip);
   const configuredIp = normalizeRuntimeIp(drone.ip);
-  const timestampVal = getHeartbeatTimestamp(safeHb);
   const now = Date.now();
-  const fallbackHeartbeatAgeSec =
-    timestampVal !== null
-      ? Math.floor((now - timestampVal) / 1000)
-      : null;
+  const slotEvidence = getMissionSlotEvidence(safeHb, now);
+  const heartbeatIp = slotEvidence.fresh ? normalizeRuntimeIp(safeHb.ip) : '';
+  const fallbackHeartbeatAgeSec = slotEvidence.ageSec === null ? null : Math.floor(slotEvidence.ageSec);
   const heartbeatPresentation = buildHeartbeatPresencePresentation(safeHb, fallbackHeartbeatAgeSec);
   const heartbeatStatus = heartbeatPresentation.label;
   const heartbeatStatusClass = heartbeatPresentation.statusClass;
@@ -1564,8 +1530,7 @@ export default function DroneConfigCard({
 
   // Position IDs from config & heartbeat
   const configPosId = normalizeComparableId(drone.pos_id, drone.hw_id); // from config
-  const assignedPosId = normalizeComparableId(safeHb.pos_id); // heartbeat assigned
-  const autoPosId = normalizeComparableId(safeHb.detected_pos_id);
+  const { assignedPosId, autoPosId } = slotEvidence;
 
   // Additional highlight if mismatch or newly detected
   const hasAnyMismatch = ipMismatch || drone.isNew;

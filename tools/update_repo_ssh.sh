@@ -18,6 +18,10 @@ if [[ -f "${DEPLOYMENT_PROFILE_LOADER}" ]]; then
     # shellcheck disable=SC1090
     source "${DEPLOYMENT_PROFILE_LOADER}"
 fi
+if [[ -f "${SCRIPT_DIR}/git_sync_mds/sdk_runtime_guard.sh" ]]; then
+    # shellcheck source=git_sync_mds/sdk_runtime_guard.sh
+    source "${SCRIPT_DIR}/git_sync_mds/sdk_runtime_guard.sh"
+fi
 
 # ----------------------------------
 # Configuration and Default Settings (Built-in Defaults)
@@ -1175,23 +1179,17 @@ ensure_mavsdk_runtime_artifact() {
         return 0
     fi
 
-    if [[ -x "${REPO_DIR}/mavsdk_server" ]]; then
-        MAVSDK_RUNTIME_STATUS="present"
-        log_debug "$component" "mavsdk_server runtime artifact is present"
-        return 0
-    fi
-
     if [[ ! -f "$downloader" ]]; then
         MAVSDK_RUNTIME_STATUS="missing_downloader"
         log_warn "$component" "mavsdk_server is missing and downloader is unavailable at ${downloader}"
-        return 0
+        return 1
     fi
 
     if [[ -n "${MDS_MAVSDK_VERSION:-}" ]]; then
         version_args=(--version "${MDS_MAVSDK_VERSION}")
     fi
 
-    log_warn "$component" "mavsdk_server is missing or not executable; attempting runtime provisioning"
+    log_info "$component" "Verifying/provisioning the manifest-bound MAVSDK server"
     if MDS_INSTALL_DIR="${REPO_DIR}" bash "$downloader" "${version_args[@]}"; then
         chmod +x "${REPO_DIR}/mavsdk_server" 2>/dev/null || true
         if [[ -x "${REPO_DIR}/mavsdk_server" ]]; then
@@ -1202,8 +1200,8 @@ ensure_mavsdk_runtime_artifact() {
     fi
 
     MAVSDK_RUNTIME_STATUS="warning"
-    log_warn "$component" "Unable to provision mavsdk_server; PX4 params and onboard ULog MAVSDK operations remain unavailable"
-    return 0
+    log_warn "$component" "MAVSDK pair not activated; old artifact preserved. Stop grounded runtime and inspect provisioning evidence before retrying."
+    return 1
 }
 
 # ----------------------------------
@@ -1211,7 +1209,7 @@ ensure_mavsdk_runtime_artifact() {
 # ----------------------------------
 check_requirements_update() {
     local component="PIP-UPDATE"
-    local mds_dir="${HOME}/.mds"
+    local mds_dir="${RESOLVED_HOME}/.mds"
     local req_hash_file="${mds_dir}/requirements.sha256"
 
     # Ensure .mds directory exists
@@ -1223,19 +1221,36 @@ check_requirements_update() {
         return 0
     fi
 
+    local runtime_python=""
+    if ! preflight_validate_mavsdk_sync_environment; then
+        REQUIREMENTS_UPDATE_STATUS="maintenance_required"
+        return 1
+    fi
+    if ! runtime_python=$(resolve_sdk_sync_python); then
+        REQUIREMENTS_UPDATE_STATUS="bootstrap_pending"
+        return 0
+    fi
+
     local current_hash
     current_hash=$(sha256sum "$REPO_DIR/requirements.txt" 2>/dev/null | cut -d' ' -f1)
 
     if [[ -f "$req_hash_file" ]]; then
         local stored_hash
-        stored_hash=$(cat "$req_hash_file" 2>/dev/null)
+        stored_hash=$(cat "$req_hash_file" 2>/dev/null || true)
 
         if [[ "$current_hash" != "$stored_hash" ]]; then
             log_info "$component" "requirements.txt changed, updating venv..."
             set_led_status "SERVICES_UPDATING"
 
-            if [[ -x "$REPO_DIR/venv/bin/pip" ]]; then
-                if "$REPO_DIR/venv/bin/pip" install -r "$REPO_DIR/requirements.txt" --quiet 2>/dev/null; then
+            if "$runtime_python" -m pip --version >/dev/null 2>&1; then
+                if [[ -f "$REPO_DIR/tools/mavsdk_runtime.py" ]] && \
+                    ! "$runtime_python" "$REPO_DIR/tools/mavsdk_runtime.py" python-platform; then
+                    REQUIREMENTS_UPDATE_STATUS="warning"
+                    return 1
+                fi
+                if "$runtime_python" -m pip install -r "$REPO_DIR/requirements.txt" --quiet 2>/dev/null && \
+                    { [[ ! -f "$REPO_DIR/tools/mavsdk_runtime.py" ]] || \
+                      "$runtime_python" "$REPO_DIR/tools/mavsdk_runtime.py" python-check; }; then
                     log_info "$component" "Python requirements updated successfully"
                     echo "$current_hash" > "$req_hash_file"
                     REQUIREMENTS_UPDATE_STATUS="updated"
@@ -1243,10 +1258,12 @@ check_requirements_update() {
                 else
                     REQUIREMENTS_UPDATE_STATUS="warning"
                     log_warn "$component" "Failed to update Python requirements"
+                    return 1
                 fi
             else
                 REQUIREMENTS_UPDATE_STATUS="warning"
-                log_warn "$component" "venv pip not found at $REPO_DIR/venv/bin/pip"
+                log_warn "$component" "pip is unavailable in the selected runtime Python: $runtime_python"
+                return 1
             fi
         else
             REQUIREMENTS_UPDATE_STATUS="unchanged"
@@ -2115,15 +2132,28 @@ main() {
         fi
         log_error_and_exit "POST-SYNC-VALIDATION" "Pulled runtime changes failed validation and rollback did not succeed"
     fi
+    # Admit the complete SDK source/environment contract before changing any
+    # server binary, requirements, systemd templates or connectivity sidecars.
+    if ! source "${REPO_DIR}/tools/git_sync_mds/sdk_runtime_guard.sh" ||
+       ! preflight_validate_mavsdk_sync_environment; then
+        if rollback_repository_to_previous_head "$previous_head" "SDK-MAINTENANCE"; then
+            exit_with_failure_result "SDK-MAINTENANCE" "SDK migration requires a staged compatible environment; source rolled back and existing runtime preserved" 1 "GIT_FAILED_CONTINUING"
+        fi
+        log_error_and_exit "SDK-MAINTENANCE" "SDK admission failed and source rollback did not succeed"
+    fi
     report_git_sync_phase "service_reconcile" "Reconciling systemd service templates" "running"
     if ! check_service_updates; then
         exit_with_failure_result "SERVICE-UPDATE" "Post-sync systemd unit reconcile failed and requires manual recovery" 1 "GIT_FAILED_CONTINUING"
     fi
     report_git_sync_phase "runtime_reconcile" "Reconciling MAVSDK, connectivity, MAVLink, and Python runtime" "running"
-    ensure_mavsdk_runtime_artifact
+    if ! ensure_mavsdk_runtime_artifact; then
+        exit_with_failure_result "MAVSDK-RUNTIME" "SDK pair activation refused; Python requirements were not changed" 1 "GIT_FAILED_CONTINUING"
+    fi
     check_connectivity_updates
     check_mavlink_runtime_updates
-    check_requirements_update
+    if ! check_requirements_update; then
+        exit_with_failure_result "MAVSDK-RUNTIME" "SDK client activation refused; stop grounded runtime and inspect evidence" 1 "GIT_FAILED_CONTINUING"
+    fi
     report_git_sync_phase "restart" "Applying post-sync service actions" "running"
     apply_post_sync_service_actions
 

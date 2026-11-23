@@ -1,138 +1,250 @@
-# Dashboard Operator Guide
+# Overview operator guide
 
-This guide describes the main MDS Operations Dashboard route.
+Use **Overview** to check the fleet and send general aircraft commands. Set up,
+start and monitor missions on their own pages: **Smart Swarm**, **Drone Show**,
+**Custom CSV Show**, **Swarm Trajectory** or **QuickScout**.
 
-## Purpose
+[Open the five-step illustrated guide](../assets/operator-overview/overview-operator-guide.png).
+The screenshots use a synthetic fleet, not aircraft clearance.
 
-The dashboard is the operator's first-glance control surface for fleet status,
-dispatch scope, command readiness, and high-priority mission actions.
+## Check the aircraft
 
-Use it to:
+1. Confirm **REAL** or **SITL** at the top of the page.
+2. Check the available-aircraft and attention counts.
+3. Open an aircraft card to inspect current measurements
+   and any issue. Inspection does not select it for commands.
 
-- confirm which drones are online, delayed, unavailable, ready, or armed
-- keep dispatch scope aligned with visible live drones
-- review command preflight state before launch or recovery actions
-- trigger supported missions and recovery commands
-- drill into a drone card only when more detail is needed
+**Available** is the initial filter: an accepted heartbeat in the last minute.
+After ten seconds without a heartbeat the card dims and shows a clock; after
+one minute it leaves Available. **All aircraft** still includes it, and
+**Command aircraft** finds recipients even when no longer available.
+These display windows are configurable; they are not flight-readiness checks.
 
-## Operator Model
+**Board** is the initial view. **List** compares aircraft in compact rows;
+**Map** shows current trusted positions. Switching views keeps the same targets.
+Aircraft without current positions remain in the list; the map provides a link
+to find them. A map marker opens inspection, not command selection.
 
-The dashboard uses a compact command model:
+![Overview with explicit aircraft targets and general controls](../assets/operator-overview/overview-3-1440-dark.png)
 
-- visible card wall = what the operator is currently reviewing
-- dispatch scope = what command actions will target
-- `Use visible` = copy the currently visible commandable drones into dispatch scope
-- selected card styling = whether a drone is included in dispatch scope; cards
-  outside dispatch are muted and show an `Out` scope control/ribbon
-- preflight summary = readiness blockers before command dispatch
+Callsigns are shown when configured; **H1**, **H2**, etc. identify the physical
+aircraft even when names are duplicated. **P1**, **P2**, etc. identify position
+slots. Each card pairs an aircraft schematic with a small phase marker for
+grounded, airborne, taking off, landing or unknown. The illustration is not an
+airframe footprint, heading or proof that motors stopped. Phase, named flight
+mode and ground readiness sit together beside it. One fixed strip below shows
+GNSS fix, altitude/datum, transport and battery in that order, in Board and List.
+Battery percentage remains readable inside the smaller gauge. Exact
+heartbeat age and Fresh/Stale labels remain in the link hint and inspector
+diagnostics. The card uses measured Wi-Fi strength arcs, or the actual Ethernet/
+USB transport symbol. No percentage is permanently repeated beside Wi-Fi.
+The battery outline fills to PX4's reported percentage, shown inside; a bolt
+means current, fault-free charging evidence. Unknown charge is a dash, not an
+empty battery or a voltage-based estimate. Hover the instruments for voltage,
+SSID and reported signal. Keyboard focus announces phase, readiness, the first
+issue, battery and link; Enter opens full details. Focus never puts a tooltip
+over aircraft warnings. Tap the card for details on touch devices. Cached
+measurements have a dotted underline and the shared stale/link marker; their
+hints and inspection retain explicit last-known provenance.
+The inspector also shows the **Configured IP**; this is an address
+from the shared fleet model, not proof that the aircraft is reachable. The
+current state/mode and any active mission appear below. Only actual issues add
+warning text. Tap/click the card for satellites, voltage and full measurements.
+The **Network** detail names the companion-reported primary transport: Wi-Fi,
+Ethernet, cellular or USB network. Its icon matches the transport; only current
+Wi-Fi evidence shows a signal percentage. Older companions without a primary
+link show their single known transport or **Multiple links** rather than guessing
+which is in use. Missing evidence stays **Unknown**; stale transport is marked
+**last known**. This is not proof of Internet latency or the VPN's route.
+Unavailable card measurements use a dash, never an invented zero. Altitude
+precision adapts to scale; its datum and full reading remain in the hint.
+Small badges on the schematic distinguish initialization, stale/missing link
+evidence and ground readiness. A severity-prioritized alert marker shows the
+condition count; clicking it opens the same aircraft inspector with the full
+reasons near the top. Viewing a condition does not acknowledge or clear it.
 
-By default, dispatch tracks visible online/degraded drones. If the operator
-manually changes target scope, the dashboard stops auto-tracking until `Use
-visible` is selected again.
+![Aircraft state and alert badges, shown using synthetic examples](../assets/operator-overview/state-gallery-dark.png)
 
-## Link State Semantics
+![Aircraft alert reasons remain in the identity-scoped inspector](../assets/operator-overview/aircraft-alerts-dark.png)
+Flight modes use names; raw codes remain in inspection diagnostics. Wi-Fi signal
+is drawn only when a fresh heartbeat actually reports it, not as inferred radio
+range, packet-delivery rate or end-to-end latency. A clock replaces stale signal;
+unknown strength is marked with a question mark rather than zero bars.
 
-Drone cards distinguish:
+A brief refresh/link failure immediately ages the underlying evidence and may
+show a neutral clock or unknown flight state; it does not immediately create a
+large warning. Routine link attention requires three seconds of persistence,
+then two seconds of stable recovery to clear. Already-offline evidence, native
+PX4 conditions and urgent battery alerts are not delayed. Raw facts remain in
+aircraft details throughout. These presentation delays do not extend the
+10-second stale/60-second Available windows or relax any command/flight checks.
+Failed configuration refresh is not labelled a telemetry outage. With a cached
+roster, a lone failed configuration refresh stays quiet; repeated failures warn.
 
-- live: fresh trusted heartbeat or telemetry
-- recently lost: short grace window after a dropped link
-- stale: link evidence is old and should not count as live
-- offline: stale threshold exceeded
-- never seen: configured but no accepted heartbeat or telemetry has been observed in this GCS runtime
-- blocked: link is live but preflight/readiness blocks operation
+The compact **Software differs** notice compares source revisions with the GCS;
+it is not a flight-health warning. **Version unavailable** is unconfirmed evidence,
+not proof that an update is required. **Review** opens Fleet operations without
+preparing or sending an update. Source updates belong to grounded maintenance.
+Brief refresh failures keep the existing surface and measurements; older software
+evidence becomes explicitly unavailable. No reconnect changes command targets.
+Known source attention remains during the Available window instead of disappearing
+and reappearing on a brief aircraft link loss. This is display continuity only;
+Fleet operations still requires fresh evidence before an update.
 
-The dashboard should make these states visible without forcing the operator to
-open every card.
+![Compact source-review notice and symbolic link state, using synthetic SITL aircraft](../assets/operator-overview/software-review-desktop-dark.png)
 
-During a brief link loss, cards may keep showing last-known values with muted
-styling. Treat these as situational awareness only; command readiness and
-preflight state must come from fresh telemetry or an explicitly accepted
-heartbeat state.
+[Phone view of the same workflow](../assets/operator-overview/software-review-phone-dark.png).
 
-GPS fix and mappable position are separate signals. A drone can report a raw
-3D GPS fix while PX4 has not yet published a valid `GLOBAL_POSITION_INT`
-coordinate. In that case dashboard cards show GPS quality but mark altitude,
-home distance, and map placement as pending instead of rendering `0,0,0` as a
-real location.
+Fleet Map's 2D and 3D aircraft popups use the same transport labels and console
+theme. **Details** reveals the configured IP, reported network/interface and last
+telemetry time. Selecting another aircraft closes its previous action/jog review;
+it cannot inherit a reviewed target. Source coordinates and map positioning are
+not changed by this presentation update. A single bounded inspector serves the
+2D map providers and 3D scene: right-side on desktop, bottom sheet on phones.
+Expanded details scroll inside it instead of clipping behind the map boundary.
 
-Each card header also includes an icon-only primary-link indicator. It follows
-the node-reported default route, not every active interface:
+![Bounded aircraft inspector, using synthetic aircraft and an offline grid rather than a surveyed basemap](../assets/operator-overview/map-inspector-desktop-dark.png)
 
-- Ethernet shows a wired-link icon.
-- Wi-Fi shows a Wi-Fi icon plus compact signal bars.
-- USB/HiLink modems show a USB/4G icon.
-- Cellular/GSM links show a mobile-link icon.
+## Select command targets
 
-Hover or tap the icon for SSID, interface, signal, and internet probe details.
-Keep the visible card text focused on flight state; add new transport details to
-this icon cluster or the drill-down panel unless they are command-critical.
+A fresh browser session starts with the **available configured aircraft** selected
+once the first configuration and heartbeat snapshot have loaded. Where a
+saved selection is available for the same operator, GCS and runtime, it is
+restored—including a deliberately empty selection.
 
-## SITL And REAL Safety
+- The **To** control beside Takeoff/Hold/Land/Return shows command recipients.
+  If they are correct, go straight to the command—no extra selection step.
+- To change them, open **To**, check aircraft, then **Use N aircraft**.
+  Search never excludes hidden rows. Cancel/Escape discards the draft.
+- For a quick change, use the blue checkbox on a card. It updates the same
+  **To** list immediately; no command is sent. It locks while an action review
+  owns the recipient snapshot. The separate green readiness tick is status only.
+- **Available** snapshots aircraft available now. Cluster shortcuts appear only
+  for multiple clusters; **All configured** is under the ellipsis menu. The
+  clear icon makes an empty draft; applying it disables commands.
+- The eye-marked **Show**, search and Board/List/Map change only what you see.
+  The card body opens details; only its blue checkbox changes recipients.
+  A selected checkbox is not evidence that the aircraft is ready to fly.
+- The eye-slash count beside **To** identifies recipients outside the current
+  view (including aircraft without a current map position). Click it to reveal
+  the recipient list; command recipients do not change.
+- Link loss, reconnects and newly discovered aircraft never change your targets.
+- If a remembered aircraft no longer exists in the configuration, resolve the
+  named missing target before dispatch. It is never silently replaced.
 
-The sidebar runtime badge shows whether the GCS is running in `SITL` or `REAL`.
-Runtime switching is handled from GCS Runtime. Heartbeat intake is mode-fenced so
-SITL and real aircraft are not mixed after a restart.
+Unselected aircraft stay readable so their hazards are not hidden. Before
+confirming an action, check its aircraft names and count again.
 
-Before sending commands, verify:
+For multiple multi-aircraft formations, the cluster icon groups the display
+without changing targets. It is hidden for a single formation; the cluster
+shortcut inside **To** separately changes the recipient draft.
 
-- the sidebar mode is correct
-- the dispatch scope count matches the intended aircraft set
-- selected cards show `In` and intentionally excluded cards show `Out`
-- preflight has no unresolved blockers for the current target scope
+![Command recipients are reviewed separately from the display, using synthetic aircraft](../assets/operator-overview/command-aircraft-1440-dark.png)
 
-The command surface uses one operational status strip. `READY` means all
-selected aircraft are armable; `READY · CAUTION` means PX4/MDS has an advisory
-warning but no active blocker; `NOT READY` means at least one target is
-blocked. Click a metric only when you need the affected aircraft and reason.
-The normal view intentionally omits diagnostic prose; the confirmation dialog
-and command monitor contain delivery/execution detail when it matters.
+## Send a general command
 
-GNSS terminology is deliberately kept separate. Horizontal and vertical drift
-are rates (m/s) calculated by PX4 while stationary, while position uncertainty
-is expressed in metres. MDS does not reinterpret one as the other or silently
-relax PX4 drift, heading, estimator, or arming checks. An amber advisory is
-context, not permission to bypass a PX4 preflight failure.
+| Control | Result |
+| --- | --- |
+| **Takeoff** | Opens the shared aircraft/height/readiness review. Groups default to **All armed first** before release. |
+| **Hold** | Commands an airborne aircraft to hold its position; it does not take off. |
+| **Land** | Lands at the aircraft's current position. |
+| **Return** | Sends immediate PX4 RTL. No sequencing or route separation. |
+| **More** | Ground tests, less-used actions and service controls. Read the action review before confirming. |
 
-When a target rejects during preparation, delivery, or execution, the command
-monitor shows a bounded per-aircraft reason. Read that reason before retrying;
-do not repeat a command merely to force a green state. A fleet preparation
-barrier reduces partial launches, but final PX4 and node checks remain
-per-aircraft and cannot make physical takeoff atomic.
+![Takeoff review keeps aircraft targets separate from the launch mode](../assets/operator-overview/takeoff-review-dark.png)
 
-Mission-specific reminders:
+For an isolated intervention, inspect an aircraft and use its own controls.
+These address that aircraft only, independently of the dashboard selection.
+**Move** is available for a currently observed airborne aircraft. Its **More**
+panel is scoped to that exact hardware ID, not the bulk selection. Opening a
+panel freezes its target set; subsequent filtering or reconnects cannot retarget it.
 
-- Drone Show uses one canonical `/drone-show` workspace. **Design / Setup** is
-  for SkyBrush import, preview/validation, launch mode, geometry, and export;
-  **Operate** is for readiness, launch, progress, fleet status, and recovery.
-  The older `/drone-show-design` and `/manage-drone-show` bookmarks open the
-  same workspace and must not be treated as separate show state.
-- QuickScout launches from its own review dialog after the SAR package is
-  computed. Monitor and abort/return controls remain in QuickScout.
-- Smart Swarm opens the same controls on Overview and `Smart Swarm` → `Operate`:
-  **Takeoff**, **Start Swarm**, **Return**. Each is separate and confirms exact
-  aircraft. The first saved cluster is initially selected; inspection and general
-  dashboard selections never retarget swarm controls. A disappeared selection
-  requires choosing again. `Formation` contains assignments and publishing.
-- Return defaults to Sequential RTL, 10 seconds between commands. The confirmation
-  shows order and interval; paths may overlap. `Other actions` provides Land here,
-  immediate RTL and explicit individual-aircraft recovery. `Cancel remaining`
-  cancels pending returns only, not aircraft already returning. Issued commands
-  and observed landings are different states. Do not interpret unknown as landed.
-- Swarm Trajectory is prepared on the Swarm Trajectory page, but final Mission
-  Type 4 dispatch still happens from Dashboard Mission Trigger after validation
-  and readiness are clear.
-- Hold is an in-flight PX4 hold action. It is intentionally rejected while the
-  drone is grounded or not armed so it cannot be mistaken for a takeoff command.
-- Local-position, VIO, or baro-only altitude can be useful for awareness, but
-  global waypoint missions still require map-trusted position truth.
+![More actions uses the same scoped side-panel layout](../assets/operator-overview/more-actions-dark.png)
 
-## Related Guides
+If a new general action includes unavailable aircraft, the review names them.
+**Remove unavailable** creates a reduced-target review without changing the main
+selection. Alternatively, **Attempt unavailable aircraft** acknowledges one
+bounded dispatch attempt to the exact targets. This is not deferred delivery or
+automatic replay after reconnection. PX4/native checks still apply. Takeoff keeps
+its own live readiness and coordinated-launch checks; this acknowledgment cannot
+bypass them. An unconfirmed command can only be looked up, not edited or resent.
 
+![Unavailable aircraft are named in the action review](../assets/operator-overview/unavailable-target-review-dark.png)
+
+The motor-arm test is a physical test, not just a connectivity check. On real
+aircraft, confirmation requires propellers removed, airframes secured and the
+test area clear. PX4 and native action checks still apply.
+
+**Return** on Overview is different from **Managed Return** on mission pages.
+Managed Return can stagger RTL commands; it does not guarantee separated flight
+paths. PX4 still controls each return and its configured return height.
+
+![Immediate Return review states its actual behavior](../assets/operator-overview/return-review-dark.png)
+
+## Read command progress
+
+Open **Activity** to see recent commands, affected aircraft, execution progress
+and rejection reasons. Activity remains available when you change pages and
+rehydrates from GCS command history after a refresh.
+
+Request acceptance is not completion. Check partial, rejected or unconfirmed
+outcomes before retrying. An unconfirmed submission retains its request identity;
+its **Check** control looks up the receipt without sending it again. An
+unconfirmed request does not disable unrelated Hold, Land or Return actions;
+their own target-bound reviews remain separate. Nothing automatically replays
+when the connection returns.
+
+Closing a review or monitor is not a command to stop an aircraft. Use the named
+flight/recovery controls on Overview or the owning mission page.
+
+**Alerts** keeps aircraft-condition episodes separate from command activity.
+**Seen** acknowledges an alert; it does not clear the aircraft's condition.
+Fleet observation continues while another workspace is open. When the shared
+source cannot provide current evidence, the panel shows the last observation
+and its age; it does not claim those conditions are current or resolved.
+A GCS outage is one aggregate alert, not a repeating aircraft toast. Connection
+recovery requires no transport selection and never replays a flight command.
+
+## Understand unavailable data
+
+**Live** means current telemetry is available. **Heartbeat only**, **Link lost**,
+**Offline** and **Never seen** identify different missing-evidence situations.
+Configured aircraft remain inspectable when unavailable. **Unknown** does not
+mean disarmed or landed.
+
+Last-known measurements are marked; missing measurements stay unknown. GPS fix
+type and usable map position are separate. **3D fix → DGPS → RTK float → RTK
+fixed** are receiver fix classifications, not an instruction from PX4 to skip
+RTK. An aircraft can report a GPS fix before a valid global position is ready.
+
+Readiness in a review is action-specific. PX4 and the drone recheck at execution;
+a green display cannot guarantee physical takeoff. Position uncertainty in
+metres is different from stationary drift in metres/second. The dashboard does
+not bypass PX4 drift, heading, estimator or arming checks.
+
+## Tablet and phone
+
+The same selection and confirmation rules apply. Navigation opens from the
+menu button; inspection opens as a screen-sized panel. The selected count and
+action rail remain accessible. Secondary information is available by tap and
+keyboard as well as hover.
+
+![Phone layout retains targets and flight controls](../assets/operator-overview/overview-3-390-light.png)
+
+## Mission workspaces
+
+| Mission | Next step |
+| --- | --- |
+| [Smart Swarm](../features/smart-swarm.md) | Review or capture the formation; use Operate for Takeoff, Start Swarm, Pause and Managed Return. |
+| [Drone Show](../features/drone-show.md) | Import/review the package, check origin and launch slots, select targets/timing, then launch from Operate. |
+| [Custom CSV Show](../features/drone-show.md#custom-csv-mode) | Review the shared local-frame CSV, select aircraft/timing and launch from its Operate tab. |
+| [Swarm Trajectory](../features/swarm-trajectory.md) | Plan, generate and review the package, then Start from Operate. |
+| [QuickScout](../quickscout.md) | Prepare the search package and use its own launch review and monitor. |
+
+## Related guides
+
+- [Coordinated Takeoff](coordinated-takeoff.md)
 - [Fleet Ops](fleet-ops.md)
-- [Runtime Config Sources](runtime-config-sources.md)
+- [Telemetry altitude policy](telemetry-altitude-policy.md)
+- [Runtime configuration](runtime-config-sources.md)
 - [SITL Control](sitl-control.md)
-- [Smart Swarm](../features/smart-swarm.md)
-- [Drone Show](../features/drone-show.md)
-- [Swarm Trajectory](../features/swarm-trajectory.md)
-- [QuickScout](../quickscout.md)
-- [Mission Planning Workspace](../features/mission-planning-workspace.md)

@@ -1,399 +1,177 @@
-@import './DesignTokens.css';
-
-.overview-container {
-    min-height: var(--workspace-height, 100dvh);
-    background: transparent;
-    color: var(--color-text-primary);
-    width: 100%;
-    min-width: 0;
+/* One operational surface; selection is blue, not a health claim. */
+.fleet-overview { display:flex; flex-direction:column; min-width:0; min-height:var(--workspace-height,88dvh); color:var(--color-text-primary); }
+.fleet-overview button,.fleet-overview input,.fleet-overview select,.fleet-inspector button { font:inherit; }
+.fleet-overview button,.fleet-overview select,.fleet-inspector button { min-height:44px; border:1px solid var(--color-border-primary); border-radius:2px; padding:.5rem .8rem; color:var(--color-text-primary); background:var(--color-bg-primary); cursor:pointer; }
+.fleet-overview button:hover:not(:disabled),.fleet-inspector button:hover { background:var(--color-bg-tertiary); border-color:var(--color-border-secondary); }
+.fleet-overview button:disabled { opacity:.45; cursor:not-allowed; }
+.fleet-overview :focus-visible,.fleet-inspector :focus-visible { outline:2px solid var(--color-primary); outline-offset:3px; }
+.fleet-overview input,.fleet-overview select { color:var(--color-text-primary); background:var(--color-bg-primary); border:1px solid var(--color-border-primary); border-radius:2px; min-height:44px; }
+.fleet-overview input[type=search] { padding:.6rem .8rem; width:100%; }
+.fleet-overview input[type=checkbox] { width:20px; height:20px; min-height:0; accent-color:var(--color-primary); cursor:pointer; }
+.fleet-overview__header { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:.3rem 0 1.2rem; flex-wrap:wrap; }
+.fleet-overview h1 { margin:.15rem 0 0; font-size:clamp(1.55rem,2.2vw,2rem); font-weight:600; letter-spacing:-.02em; }
+.fleet-eyebrow { font-family:var(--font-family-mono); font-size:.64rem; letter-spacing:.17em; color:var(--color-text-secondary); }
+.fleet-status-strip { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; font-size:.83rem; color:var(--color-text-secondary); }
+.fleet-status-strip button { display:inline-flex; align-items:center; gap:.4rem; border:0; background:transparent; }
+.fleet-runtime { font-family:var(--font-family-mono); font-size:.73rem; letter-spacing:.06em; border-left:3px solid var(--color-primary); padding-left:.6rem; color:var(--color-text-primary); }
+.fleet-runtime.is-unknown { border-color:var(--color-warning); }
+.fleet-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:.55rem; border-top:1px solid var(--color-border-secondary); padding:.85rem 0; }
+.fleet-search { width:min(280px,100%); }
+.fleet-display-filter { display:inline-flex; align-items:center; gap:.5rem; min-width:0; }
+.fleet-display-filter > span { display:inline-flex; align-items:center; gap:.35rem; color:var(--color-text-secondary); font-size:.78rem; }
+.fleet-display-filter > span svg { width:.8rem; }
+.fleet-view-switch { display:flex; margin-left:auto; }
+.fleet-view-switch button { display:flex; align-items:center; justify-content:center; gap:.45rem; border-radius:0; min-width:44px; }
+.fleet-view-switch button + button { border-left:0; }
+.fleet-view-switch button[aria-pressed=true] { color:var(--color-primary); background:var(--color-primary-light); box-shadow:inset 0 -2px var(--color-primary); }
+.fleet-surface { flex:1; position:relative; min-height:300px; padding:1rem 0 1.5rem; }
+.fleet-board { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,270px),1fr)); gap:1px; align-content:start; border-top:1px solid var(--color-border-primary); border-left:1px solid var(--color-border-primary); }
+.fleet-aircraft { position:relative; min-width:0; background:var(--color-bg-primary); box-shadow:inset -1px -1px var(--color-border-primary); border:2px solid transparent; }
+.fleet-aircraft.is-inspected { border-color:var(--color-primary); }
+.fleet-aircraft__recipient { position:absolute; z-index:1; top:.1rem; right:.15rem; width:44px; height:44px; display:flex; align-items:center; justify-content:center; cursor:pointer; color:var(--color-primary); }
+.fleet-aircraft__recipient input[type=checkbox] { width:20px; height:20px; min-height:20px; margin:0; accent-color:var(--color-primary); }
+.fleet-aircraft__recipient:has(input:disabled) { cursor:default; }
+.fleet-aircraft__recipient:focus-within { outline:2px solid var(--color-primary); outline-offset:-3px; }
+.fleet-overview .fleet-aircraft__inspect { display:flex; width:100%; min-width:0; min-height:184px; height:100%; padding:.75rem .8rem .65rem; gap:.5rem; flex-direction:column; text-align:left; background:transparent; border:0; box-shadow:none; }
+.fleet-aircraft__identity { display:flex; gap:.5rem; align-items:center; padding-right:2.2rem; width:100%; min-width:0; }
+.fleet-aircraft__identity > span { display:flex; flex-direction:column; gap:.2rem; min-width:0; }
+.fleet-aircraft__identity strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.95rem; font-weight:600; }
+.fleet-aircraft__identity small { font:.67rem var(--font-family-mono); color:var(--color-text-secondary); flex-shrink:0; }
+.fleet-aircraft-symbol { width:20px; height:20px; flex-shrink:0; color:var(--color-text-secondary); overflow:visible; }
+.fleet-state-symbol path,.fleet-state-symbol circle { stroke:currentColor; fill:none; stroke-width:1.6; stroke-linejoin:round; stroke-linecap:round; }
+.fleet-aircraft-symbol[data-state=airborne],.fleet-aircraft-symbol[data-state=taking-off],.fleet-aircraft-symbol[data-state=landing] { color:var(--color-primary); }
+.fleet-aircraft__flight { display:flex; align-items:center; justify-content:center; gap:.9rem; width:100%; min-width:0; min-height:76px; }
+.fleet-aircraft__state { display:flex; flex-direction:column; align-items:flex-start; justify-content:center; gap:.2rem; min-width:0; max-width:calc(100% - 86px); font-size:.8rem; }
+.fleet-aircraft__state > strong { font-weight:600; }
+.fleet-aircraft__state small { color:var(--color-text-secondary); font-size:.7rem; }
+.fleet-link-dot { width:5px; height:5px; background:var(--color-text-muted); display:inline-block; }
+.fleet-link-dot.is-current { background:var(--color-success); }
+.fleet-aircraft__issue { display:flex; align-items:center; gap:.35rem; min-height:1.2rem; font-size:.72rem; max-width:100%; }
+.fleet-aircraft__issue > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fleet-aircraft__issue svg { flex-shrink:0; }
+.fleet-overview .tone-warning,.fleet-inspector .tone-warning { color:var(--color-warning); }
+.fleet-overview .tone-good,.fleet-inspector .tone-good { color:var(--color-success); }
+.fleet-overview .tone-danger,.fleet-inspector .tone-danger { color:var(--color-danger); }
+.fleet-overview .tone-muted { color:var(--color-text-secondary); }
+.fleet-board--list { display:flex; flex-direction:column; }
+.fleet-overview .fleet-board--list .fleet-aircraft__inspect { display:grid; grid-template-columns:minmax(125px,.8fr) minmax(150px,1fr) minmax(255px,1.5fr); align-items:center; min-height:84px; padding:.6rem 3rem .6rem 1rem; gap:.7rem; }
+.fleet-board--list .fleet-aircraft__identity { padding-right:0; }
+.fleet-action-rail { position:sticky; bottom:0; z-index:12; display:flex; align-items:center; gap:1rem; flex-wrap:wrap; padding:.8rem 0 max(.8rem,env(safe-area-inset-bottom)); border-top:2px solid var(--color-border-secondary); background:var(--color-bg-canvas); }
+.fleet-action-rail__buttons { display:flex; gap:.4rem; }
+.fleet-action-rail__buttons button { display:flex; align-items:center; justify-content:center; gap:.55rem; min-width:85px; }
+.fleet-inline-warning { display:flex; align-items:center; flex-wrap:wrap; gap:.6rem; padding:.7rem .8rem; color:var(--color-warning); border-left:3px solid var(--color-warning); background:var(--color-warning-light); font-size:.82rem; }
+.fleet-inline-warning button { margin-left:auto; }
+.fleet-empty { text-align:center; padding:3rem 1rem; color:var(--color-text-secondary); }
+.fleet-empty h2 { font-size:1.1rem; }
+.fleet-map { height:max(400px,calc(100dvh - 350px)); position:relative; z-index:0; }
+.fleet-map__tools { position:absolute; top:.65rem; right:.65rem; z-index:1000; display:flex; gap:.4rem; max-width:calc(100% - 70px); flex-wrap:wrap; }
+.fleet-inspector { padding:0; margin:0 0 0 auto; width:min(460px,100vw); max-width:100vw; height:100dvh; max-height:100dvh; border:0; border-left:1px solid var(--color-border-secondary); color:var(--color-text-primary); background:var(--color-bg-primary); box-shadow:-12px 0 50px #0003; }
+.fleet-inspector::backdrop { background:#0006; }
+.fleet-inspector__body { padding:1.4rem; }
+.fleet-inspector header { display:flex; justify-content:space-between; gap:1rem; align-items:center; }
+.fleet-inspector header small { font:.69rem var(--font-family-mono); color:var(--color-text-secondary); }
+.fleet-inspector h2 { margin:.35rem 0; font-size:1.5rem; }
+.fleet-inspector__state { display:flex; align-items:center; gap:1rem; margin:1.5rem 0; }
+.fleet-inspector__state p { font-size:.8rem; color:var(--color-text-secondary); margin:.4rem 0; }
+.fleet-inspector__facts { display:grid; grid-template-columns:100px minmax(0,1fr); font-size:.85rem; gap:.7rem; padding-block:1rem; border-block:1px solid var(--color-border-primary); }
+.fleet-inspector__facts dt { color:var(--color-text-secondary); }
+.fleet-inspector__facts dd { margin:0; overflow-wrap:anywhere; }
+.fleet-inspector__issues { list-style:none; padding:0; font-size:.85rem; }
+.fleet-inspector__issues li { display:flex; gap:.6rem; align-items:baseline; padding-block:.4rem; }
+.fleet-inspector__issues svg { flex-shrink:0; }
+.fleet-inspector__actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.4rem; margin:1rem 0; }
+.fleet-inspector__actions button { display:flex; align-items:center; justify-content:center; gap:.4rem; min-width:0; }
+.fleet-inspector summary { cursor:pointer; min-height:44px; display:flex; align-items:center; font-size:.8rem; color:var(--color-text-secondary); }
+.fleet-inspector a { color:var(--color-primary); }
+.fleet-workspace-link { display:inline-block; padding-block:.8rem; }
+.fleet-review-targets { max-height:190px; overflow:auto; padding-left:1.3rem; font-size:.9rem; }
+.fleet-action-review fieldset { display:grid; gap:.5rem; }
+.fleet-action-review fieldset label { display:flex; align-items:center; gap:.7rem; min-height:44px; }
+.fleet-visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+.fleet-group-toggle { display:inline-flex; align-items:center; gap:.4rem; }
+.fleet-group-toggle[aria-pressed=true] { color:var(--color-primary); border-color:var(--color-primary); }
+.fleet-cluster-heading { display:flex; align-items:baseline; gap:.6rem; font-size:.9rem; font-weight:600; padding:.9rem 0 .5rem; margin:0; }
+.fleet-cluster-heading small { font:.75rem var(--font-family-mono); color:var(--color-text-secondary); }
+/* One comparison rail: GNSS, altitude/datum, transport, battery. Same order at
+   every density; no metric competes with the aircraft/status anchor. */
+.fleet-aircraft__instruments { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.12fr) 22px 46px; grid-template-areas:"gnss altitude link battery"; gap:.4rem; width:100%; align-items:center; min-height:26px; }
+.fleet-aircraft__metric--battery { grid-area:battery; }
+.fleet-aircraft__metric--altitude { grid-area:altitude; }
+.fleet-aircraft__metric--gnss { grid-area:gnss; }
+.fleet-aircraft__metric--link { grid-area:link; }
+.fleet-aircraft__portrait { flex-shrink:0; width:72px; height:72px; position:relative; display:grid; place-items:center; color:var(--color-text-secondary); }
+.fleet-aircraft__schematic { display:block; width:100%; height:100%; overflow:visible; }
+.fleet-aircraft__airframe { fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+.fleet-aircraft__body { fill:currentColor; fill-opacity:.12; }
+.fleet-aircraft__portrait[data-state=airborne],.fleet-aircraft__portrait[data-state="taking off"],.fleet-aircraft__portrait[data-state=landing] { color:var(--color-primary); }
+.fleet-aircraft__portrait[data-state=unknown] .fleet-aircraft__airframe { stroke-dasharray:3 3; }
+.fleet-aircraft__phase-marker { position:absolute; right:0; bottom:0; padding:2px; display:flex; color:inherit; background:var(--color-bg-primary); }
+.fleet-aircraft__status-badge,.fleet-aircraft__alert-badge { position:absolute; display:flex; align-items:center; justify-content:center; gap:3px; padding:3px; min-width:20px; min-height:20px; background:var(--color-bg-primary); font-size:.78rem; }
+.fleet-aircraft__status-badge { left:0; bottom:0; }
+.fleet-aircraft__alert-badge { right:0; top:0; }
+.fleet-aircraft__alert-badge small { font:.64rem var(--font-family-mono); }
+.fleet-inspector__alert-title { margin:.4rem 0; font-size:.86rem; font-weight:600; }
+.fleet-inspector__alert-title small { color:var(--color-text-secondary); margin-left:.4rem; }
+.fleet-aircraft__metric--link,.fleet-aircraft__metric--battery { justify-self:end; max-width:100%; }
+.fleet-aircraft__metric { display:flex; flex-direction:column; gap:.15rem; min-width:0; font-size:.72rem; font-variant-numeric:tabular-nums; }
+.fleet-aircraft__metric small { color:var(--color-text-secondary); font-size:.64rem; display:flex; align-items:center; gap:.3rem; }
+.fleet-aircraft__metric > span { display:flex; align-items:center; gap:.25rem; min-width:0; }
+.fleet-aircraft__value { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fleet-aircraft__metric[data-stale=true],.fleet-aircraft__mode[data-stale=true] { text-decoration:underline dotted; text-underline-offset:3px; }
+.fleet-aircraft__metric svg { flex-shrink:0; width:.85rem; height:.85rem; }
+.fleet-aircraft__metric .fleet-wifi-gauge { width:22px; height:20px; overflow:visible; }
+.fleet-wifi-gauge path { fill:none; stroke:currentColor; stroke-width:2.6; stroke-linecap:round; opacity:.18; }
+.fleet-wifi-gauge path[data-active=true] { opacity:1; }
+.fleet-wifi-gauge circle { fill:currentColor; }
+.fleet-wifi-gauge text { fill:currentColor; font-size:13px; font-weight:700; }
+.fleet-aircraft__metric .fleet-battery-gauge { width:46px; height:22px; overflow:visible; }
+.fleet-battery-instrument { position:relative; display:inline-flex; align-items:center; }
+.fleet-battery-gauge__outline { fill:none; stroke:currentColor; stroke-width:1.5; }
+.fleet-battery-gauge__terminal { stroke:currentColor; stroke-width:3; stroke-linecap:round; }
+.fleet-battery-gauge__fill { fill:currentColor; opacity:.23; transition:width .15s linear; }
+.fleet-battery-gauge text { fill:currentColor; font:600 11px var(--font-family-mono); }
+.fleet-aircraft__metric .fleet-battery-instrument__charging { position:absolute; right:1px; top:-4px; width:9px; height:12px; background:var(--color-bg-primary); }
+.fleet-aircraft__metric--mission { font-size:.68rem; color:var(--color-text-secondary); max-width:100%; }
+.fleet-aircraft__mode { margin-left:0; font-size:.73rem; color:var(--color-text-secondary); }
+.fleet-aircraft__info { margin-left:auto; width:.9rem; height:.9rem; flex-shrink:0; color:var(--color-text-secondary); }
+.fleet-aircraft__readiness { font-size:.68rem; }
+.fleet-aircraft__readiness.is-ready { color:var(--color-success); }
+.fleet-aircraft__readiness.is-blocked { color:var(--color-danger); }
+.fleet-aircraft__readiness.is-warning { color:var(--color-warning); }
+.fleet-aircraft__issue { width:100%; margin-top:auto; }
+.fleet-aircraft[data-readiness=ready][data-flight-state=grounded] { box-shadow:inset 3px 0 var(--color-success),inset -1px -1px var(--color-border-primary); }
+.fleet-aircraft[data-readiness=blocked][data-flight-state=grounded] { box-shadow:inset 3px 0 var(--color-danger),inset -1px -1px var(--color-border-primary); }
+.fleet-aircraft[data-availability=stale] { background:var(--color-bg-tertiary); }
+.fleet-aircraft[data-availability=stale] .fleet-aircraft__metrics,.fleet-aircraft[data-availability=offline] .fleet-aircraft__metrics { color:var(--color-text-secondary); }
+.fleet-aircraft[data-availability=offline],.fleet-aircraft[data-availability=unknown] { background:var(--color-bg-canvas); box-shadow:inset 3px 0 var(--color-text-muted),inset -1px -1px var(--color-border-primary); }
+.fleet-aircraft[data-availability=offline] .fleet-aircraft__identity strong { color:var(--color-text-secondary); }
+.fleet-action-review .fleet-review-unavailable { padding:.7rem; border-left:3px solid var(--color-warning); background:var(--color-warning-light); }
+.fleet-action-review .fleet-review-unavailable label { display:flex; gap:.6rem; min-height:44px; align-items:center; }
+.fleet-board--list .fleet-aircraft__flight { justify-content:flex-start; min-height:52px; gap:.6rem; }
+.fleet-board--list .fleet-aircraft__portrait { width:52px; height:52px; }
+.fleet-board--list .fleet-aircraft__status-badge,.fleet-board--list .fleet-aircraft__alert-badge { transform:scale(.8); }
+.fleet-board--list .fleet-aircraft__issue { grid-column:1/-1; }
+@media(max-width:1100px) { .fleet-overview .fleet-board--list .fleet-aircraft__inspect { grid-template-columns:minmax(125px,.8fr) minmax(140px,1fr); } .fleet-board--list .fleet-aircraft__instruments { grid-column:1/-1; grid-row:2; } }
+@media(max-width:620px) {
+  .fleet-overview__header { gap:.65rem; padding-top:0; }
+  .fleet-status-strip { gap:.65rem; font-size:.75rem; }
+  .fleet-status-strip button { padding-inline:0; }
+  .fleet-toolbar { gap:.45rem; }
+  .fleet-search { flex:1; min-width:140px; }
+  .fleet-display-filter { max-width:100%; }
+  .fleet-toolbar select { width:100%; }
+  .fleet-view-switch { margin-left:0; width:100%; }
+  .fleet-view-switch button { flex:1; justify-content:center; }
+  .fleet-board { grid-template-columns:1fr; }
+  .fleet-overview .fleet-aircraft__inspect { padding:.75rem .8rem .65rem; }
+  .fleet-aircraft__identity { flex-direction:row; gap:.5rem; }
+  .fleet-aircraft__identity strong { max-width:100%; }
+  .fleet-action-rail { gap:.5rem; }
+  .fleet-action-rail__buttons { width:100%; gap:.25rem; }
+  .fleet-action-rail__buttons button { flex:1; min-width:0; font-size:.74rem; flex-direction:column; gap:.3rem; padding-inline:.3rem; min-height:55px; }
+  .fleet-overview .fleet-board--list .fleet-aircraft__inspect { display:flex; padding-right:.8rem; }
+  .fleet-board--list .fleet-aircraft__flight { justify-content:center; }
+  .fleet-board--list .fleet-aircraft__identity { gap:.2rem; }
+  .fleet-inspector { width:100vw; }
 }
-
-.overview-header {
-    margin-bottom: var(--spacing-base);
-    padding: var(--spacing-sm);
-    background: var(--color-surface-raised);
-    border-radius: var(--border-radius-lg);
-    border: 1px solid var(--color-border-secondary);
-    box-shadow: var(--shadow-base);
-    backdrop-filter: blur(16px);
-}
-
-.overview-summary-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
-    gap: var(--spacing-base);
-}
-
-.overview-summary-panel {
-    display: grid;
-    gap: var(--spacing-sm);
-    padding: var(--spacing-sm);
-    border-radius: var(--border-radius-lg);
-    border: 1px solid transparent;
-    cursor: pointer;
-    transition: border-color 0.18s ease, background 0.18s ease;
-}
-
-.overview-summary-panel:hover,
-.overview-summary-panel.is-open {
-    border-color: var(--color-primary-border);
-    background: rgba(var(--color-primary-rgb), 0.06);
-}
-
-.overview-summary-panel:focus-visible {
-    outline: 2px solid rgba(var(--color-primary-rgb), 0.35);
-    outline-offset: 2px;
-}
-
-.overview-summary-toggle {
-    justify-self: flex-start;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.45rem;
-    min-height: 2.25rem;
-    padding: 0.45rem 0.85rem;
-    border-radius: var(--border-radius-full);
-    border: 1px solid var(--color-primary-border);
-    background: var(--color-surface-inset);
-    color: var(--color-text-primary);
-    font: inherit;
-    font-size: var(--font-size-sm);
-    font-weight: var(--font-weight-semibold);
-}
-
-.overview-summary-panel:hover .overview-summary-toggle,
-.overview-summary-panel.is-open .overview-summary-toggle {
-    border-color: var(--color-primary);
-    background: rgba(var(--color-primary-rgb), 0.12);
-}
-
-.overview-summary-toggle-icon {
-    transition: transform 0.18s ease;
-}
-
-.overview-summary-panel.is-open .overview-summary-toggle-icon {
-    transform: rotate(180deg);
-}
-
-.overview-summary-card {
-    display: grid;
-    gap: var(--spacing-xs);
-    padding: var(--spacing-base) var(--spacing-lg);
-    border-radius: var(--border-radius-md);
-    border: 1px solid var(--color-border-primary);
-    background:
-        linear-gradient(135deg, rgba(var(--color-primary-rgb), 0.08), transparent 65%),
-        var(--color-surface-inset);
-    box-shadow: inset 0 0 0 1px rgba(var(--color-primary-rgb), 0.04);
-    min-width: 0;
-}
-
-.overview-summary-card strong {
-    font-size: clamp(1.4rem, 2.6vw, 2rem);
-    color: var(--color-text-primary);
-}
-
-.overview-summary-card small,
-.overview-summary-card__label {
-    color: var(--color-text-secondary);
-}
-
-.overview-summary-card__label {
-    font-size: var(--font-size-xs);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    font-weight: var(--font-weight-bold);
-}
-
-.connected-drones-header {
-    margin: 0 0 var(--spacing-sm);
-    display: flex;
-    justify-content: space-between;
-    gap: var(--spacing-base);
-    align-items: end;
-    padding: var(--spacing-sm) 0;
-}
-
-.connected-drones-header h2 {
-    margin: 0;
-    font-size: var(--font-size-xl);
-}
-
-.connected-drones-header p {
-    margin: var(--spacing-xs) 0 0;
-    color: var(--color-text-secondary);
-}
-
-.connected-drones-count {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0.5rem 0.85rem;
-    border-radius: var(--border-radius-full);
-    border: 1px solid var(--color-border-primary);
-    background: var(--color-surface-inset);
-    color: var(--color-text-primary);
-    font-size: var(--font-size-sm);
-    font-weight: var(--font-weight-semibold);
-}
-
-.connected-drones-header__actions {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--spacing-sm);
-    flex-wrap: wrap;
-    justify-content: flex-end;
-}
-
-.connected-drones-scope {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0.5rem 0.85rem;
-    border-radius: var(--border-radius-full);
-    border: 1px solid var(--color-primary-border);
-    background: rgba(var(--color-primary-rgb), 0.12);
-    color: var(--color-text-primary);
-    font: inherit;
-    font-size: var(--font-size-sm);
-    font-weight: var(--font-weight-semibold);
-    cursor: pointer;
-    transition: var(--transition-all);
-}
-
-.connected-drones-scope:hover,
-.connected-drones-scope:focus-visible {
-    background: rgba(var(--color-primary-rgb), 0.18);
-    border-color: var(--color-primary);
-    outline: none;
-    transform: translateY(-1px);
-}
-
-.connected-drones-action {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 2.4rem;
-    padding: 0.55rem 0.9rem;
-    border-radius: var(--border-radius-full);
-    border: 1px solid var(--color-primary-border);
-    background: var(--color-primary);
-    color: var(--color-primary-text);
-    font: inherit;
-    font-size: var(--font-size-sm);
-    font-weight: var(--font-weight-semibold);
-    cursor: pointer;
-    transition: var(--transition-all);
-}
-
-.connected-drones-action:hover {
-    background: var(--color-primary-hover);
-    transform: translateY(-1px);
-}
-
-.connected-drones-action:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
-    transform: none;
-}
-
-.overview-fleet-toolbar {
-    display: grid;
-    gap: var(--spacing-sm);
-    margin: 0 0 var(--spacing-base);
-    padding: var(--spacing-base);
-    border-radius: var(--border-radius-lg);
-    border: 1px solid var(--color-border-primary);
-    background: var(--color-surface-raised);
-    box-shadow: var(--shadow-sm);
-}
-
-.overview-fleet-toolbar__search {
-    display: grid;
-    gap: 0.35rem;
-    max-width: 24rem;
-}
-
-.overview-fleet-toolbar__search span,
-.overview-fleet-toolbar__note {
-    color: var(--color-text-secondary);
-    font-size: var(--font-size-sm);
-}
-
-.overview-fleet-toolbar__search input {
-    width: 100%;
-    min-width: 0;
-    padding: var(--spacing-sm) var(--spacing-base);
-    border-radius: var(--border-radius-base);
-    border: 1px solid var(--color-border-primary);
-    background: var(--color-bg-primary);
-    color: var(--color-text-primary);
-    font: inherit;
-}
-
-.overview-fleet-toolbar__search input:focus {
-    outline: none;
-    border-color: var(--color-primary);
-    box-shadow: 0 0 0 3px var(--color-primary-light);
-}
-
-.overview-fleet-toolbar__filters {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--spacing-sm);
-}
-
-.overview-fleet-toolbar__filter {
-    padding: 0.5rem 0.85rem;
-    border-radius: var(--border-radius-full);
-    border: 1px solid var(--color-border-primary);
-    background: var(--color-bg-primary);
-    color: var(--color-text-secondary);
-    font: inherit;
-    font-weight: var(--font-weight-semibold);
-    cursor: pointer;
-    transition: var(--transition-all);
-}
-
-.overview-fleet-toolbar__filter:hover,
-.overview-fleet-toolbar__filter.active {
-    border-color: var(--color-primary-border);
-    background: rgba(var(--color-primary-rgb), 0.12);
-    color: var(--color-text-primary);
-}
-
-@media (max-width: 960px) {
-    .overview-summary-grid {
-        grid-template-columns: repeat(auto-fit, minmax(min(100%, 10.5rem), 1fr));
-    }
-}
-
-@media (max-width: 640px) {
-    .overview-header {
-        padding: var(--spacing-xs);
-        gap: var(--spacing-base);
-    }
-
-    .connected-drones-header {
-        flex-direction: column;
-        align-items: stretch;
-    }
-
-    .connected-drones-count {
-        align-self: flex-start;
-    }
-
-    .connected-drones-header__actions {
-        justify-content: flex-start;
-    }
-
-    .overview-fleet-toolbar {
-        padding: var(--spacing-sm);
-    }
-}
-
-@media (max-width: 480px) {
-    .overview-summary-grid {
-        grid-template-columns: 1fr;
-    }
-}
-
-/* Mission Control Section */
-.mission-trigger-section {
-    padding: var(--spacing-base);
-    background: var(--color-surface-raised);
-    border-radius: var(--border-radius-lg);
-    box-shadow: var(--shadow-base);
-    margin-bottom: var(--spacing-base);
-    border: 1px solid var(--color-border-secondary);
-    backdrop-filter: blur(16px);
-}
-
-/* Drone Grid with Dynamic Layout */
-.drone-list {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 20.5rem), 1fr));
-    grid-auto-rows: minmax(25.5rem, auto);
-    gap: var(--spacing-base);
-    padding: 0;
-    margin: 0;
-    align-items: stretch;
-}
-
-.drone-list__item {
-    display: flex;
-    min-width: 0;
-    contain: layout paint;
-}
-
-.overview-notice {
-    margin-bottom: var(--spacing-base);
-}
-
-.overview-empty-state {
-    grid-column: 1 / -1;
-}
-
-@media (max-width: 768px) {
-    .overview-summary-grid {
-        grid-template-columns: 1fr 1fr;
-    }
-
-    .connected-drones-header {
-        flex-direction: column;
-        align-items: stretch;
-    }
-}
-
-@media (max-width: 480px) {
-    .overview-summary-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .connected-drones-count {
-        width: fit-content;
-    }
-}
-
-@media (max-width: 640px) {
-    .overview-summary-grid {
-        grid-template-columns: 1fr;
-    }
-}
-
-@media (max-width: 1200px) {
-    .drone-list {
-        grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
-        gap: var(--spacing-sm);
-    }
-}
-
-@media (max-width: 768px) {
-    .drone-list {
-        grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
-        gap: var(--spacing-sm);
-    }
-    .drone-widget.expanded {
-        transform: scale(1);
-        margin: var(--spacing-xs) 0;
-    }
-
-    .connected-drones-header {
-        font-size: var(--font-size-base);
-        padding: var(--spacing-sm) var(--spacing-base);
-    }
-
-    .mission-trigger-section {
-        padding: var(--spacing-sm);
-        margin-bottom: var(--spacing-sm);
-    }
-
-}
-
-@media (max-width: 480px) {
-    .mission-trigger-section {
-        padding: var(--spacing-xs);
-    }
-
-}
+@media(prefers-reduced-motion:reduce) { .fleet-overview *,.fleet-inspector * { transition:none !important; animation:none !important; scroll-behavior:auto !important; } }

@@ -51,7 +51,7 @@ explicitly deferred to a later phase; see the
 | use the governed Simurgh AI operator or connect an MCP client | [Simurgh Operator Guide](docs/guides/simurgh-operator.md) |
 | import and launch a drone show | [Drone Show Guide](docs/features/drone-show.md) |
 | run Smart Swarm from the dashboard | [Smart Swarm Guide](docs/features/smart-swarm.md) |
-| author, process, and launch a Swarm Trajectory mission | [Swarm Trajectory Guide](docs/features/swarm-trajectory.md) |
+| plan and validate precomputed Swarm Trajectory missions | [Swarm Trajectory Guide](docs/features/swarm-trajectory.md) |
 | point MDS at a customer/private repo | [Custom Repo Workflow](docs/guides/custom-repo-workflow.md) |
 | install a GCS on a VPS or Ubuntu box | [GCS Setup Guide](docs/guides/gcs-setup.md) |
 | deploy real drone hardware | [MDS Init Setup Guide](docs/guides/mds-init-setup.md) |
@@ -92,15 +92,22 @@ the README.
 
 For a first dashboard-driven Smart Swarm run after SITL launch:
 
-1. open `Overview` and confirm the target drones show `READY` with live telemetry
-2. open `Swarm Design` and review the saved follow chain / cluster layout
-3. take off and stabilize the aircraft by MDS, QGC, or RC
-4. select `Smart Swarm` on `Overview`, review its short formation/status summary, then `Start Smart Swarm` and `Confirm start`
-5. use `Smart Swarm Runtime` for advanced scope and recovery controls (`Stop Swarm (Hold)`, `Land Swarm`, or `RTL Swarm`)
+1. open `Overview` and check aircraft identities, live telemetry and attention items
+2. open `Smart Swarm` and review the saved formation in `Design Swarm`
+3. use `Operate` to take off, or take off with QGC/RC and stabilize
+4. review `Start Swarm`, then confirm the intended cluster
+5. monitor from `Operate`; use Pause/Stop following, Land or Managed Return there when needed
 
-The validated 5-drone Smart Swarm acceptance flow is documented in the Smart
-Swarm and SITL guides, including the operator-safe dashboard path and the
-automation validation helper for advanced users.
+Overview retains general Takeoff, Hold, Land and immediate PX4 Return controls.
+Mission setup/start/monitoring belongs to its dedicated workspace. Overview
+selection is explicit: first-use Available or the remembered selection; filtering and
+reconnecting never change its targets. See the
+[Overview operator guide](docs/guides/dashboard-operator.md).
+
+Smart Swarm operator and automation workflows are documented in the Smart
+Swarm and SITL guides. The rebuilt SDK 4 image's current two/three-aircraft
+[acceptance record](docs/plans/2026-11-12-sdk4-image-release-acceptance.md)
+distinguishes tested artifact/runtime scope from later hardware maintenance.
 
 If you need your own fork, custom image, or a pinned redistribution workflow, do not improvise from the demo path. Use:
 
@@ -114,6 +121,7 @@ These advanced and real-hardware paths require stronger PX4/Linux/networking kno
 
 - **[Advanced SITL Guide](docs/guides/advanced-sitl.md)** for custom runtime env vars, mutable boot-sync behavior, and debug-oriented SITL tuning
 - **[Logging System Guide](docs/guides/logging-system.md)** for live and historical GCS / drone logs
+- **[Logs Operator Workflow](docs/guides/logs-operator-workflow.md)** for illustrated session export and PX4 flight-log retrieval
 - **[QuickScout Guide](docs/quickscout.md)** for SAR / recon workflows
 - **[Documentation Index](docs/README.md)** for the full map, APIs, archived notes, and deeper references
 

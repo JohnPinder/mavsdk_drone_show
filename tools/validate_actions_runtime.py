@@ -355,6 +355,12 @@ def wait_for_command(
         if desired_phase and phase == desired_phase:
             log(f"COMMAND {command_id} reached phase={phase}: {command_summary(status)}")
             return status
+        if desired_phase and state in TERMINAL_STATUSES:
+            raise RuntimeError(
+                f"Command {command_id} ended before phase={desired_phase}: "
+                f"{command_summary(status)}; reason={status.get('error_summary')}; "
+                f"preparations={status.get('preparations')}"
+            )
         time.sleep(1.0)
     raise RuntimeError(f"Timed out waiting for command {command_id}. Last status: {command_summary(last or {})}")
 
@@ -434,6 +440,8 @@ def wait_remaining_airborne(
 
 
 def wait_for_live_launch_readiness(client: ApiClient, ids: list[int], timeout: int = 90) -> dict[str, dict]:
+    last_probes: dict[str, dict] = {}
+
     def _ready():
         telemetry = client.get_telemetry()
         if not _telemetry_has_ids(telemetry, ids):
@@ -446,12 +454,19 @@ def wait_for_live_launch_readiness(client: ApiClient, ids: list[int], timeout: i
             if not drone_ip:
                 return False
             probe = client.probe_live_armability(drone_ip, require_global_position=True)
+            last_probes[str(idx)] = {
+                key: probe.get(key)
+                for key in ("success", "ready", "summary", "blockers", "probe_error")
+            }
             if not probe.get("ready"):
                 return False
             probe_results[str(idx)] = probe
         return probe_results
 
-    return wait_for(_ready, label=f"live launch readiness for drones {ids}", timeout=timeout, interval=2.0)
+    try:
+        return wait_for(_ready, label=f"live launch readiness for drones {ids}", timeout=timeout, interval=2.0)
+    except RuntimeError as exc:
+        raise RuntimeError(f"{exc}. Last native probes: {json.dumps(last_probes, sort_keys=True)}") from exc
 
 
 def get_local_snapshots(client: ApiClient, telemetry: dict[str, dict], ids: list[int]) -> dict[str, dict[str, float]]:

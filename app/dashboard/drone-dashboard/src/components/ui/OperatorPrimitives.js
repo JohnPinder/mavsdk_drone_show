@@ -373,7 +373,9 @@ export function ConfirmDialog({
   busy = false,
   allowDismissWhileBusy = false,
   appearance = 'default',
+  size = 'default',
   confirmDisabled = false,
+  initialFocusRef = null,
   onConfirm,
   onCancel,
 }) {
@@ -384,10 +386,16 @@ export function ConfirmDialog({
     if (!open) return undefined;
     const previousFocus = document.activeElement;
     const panel = panelRef.current;
-    const focusable = () => [...panel.querySelectorAll('button, input, select, textarea, a[href], [tabindex="0"]')]
-      .filter((element) => !element.disabled && !element.closest('[hidden]'));
-    // Start on Cancel, never on the flight-command confirmation.
-    (panel.querySelector('[data-dialog-cancel]') || panel).focus();
+    const focusable = () => [...panel.querySelectorAll('button, input, select, textarea, summary, a[href], [tabindex="0"]')]
+      .filter((element) => !element.disabled && !element.closest('[hidden]')
+        && (!element.closest('details:not([open])') || element.closest('summary')));
+    // Preserve desktop search shortcuts, but do not summon a touch keyboard
+    // merely by opening a picker. The panel retains accessible modal focus.
+    const preferred = initialFocusRef?.current;
+    const editable = preferred?.isContentEditable || preferred?.matches('input:not([type="checkbox"]):not([type="radio"]), textarea');
+    const avoidKeyboard = editable && window.matchMedia?.('(pointer: coarse)').matches;
+    const initialTarget = avoidKeyboard ? panel : preferred || panel.querySelector('[data-dialog-cancel]') || panel;
+    initialTarget.focus({ preventScroll: true });
     const trapFocus = (event) => {
       if (event.key !== 'Tab') return;
       const items = focusable();
@@ -405,7 +413,7 @@ export function ConfirmDialog({
       panel.removeEventListener('keydown', trapFocus);
       if (previousFocus?.isConnected) previousFocus.focus();
     };
-  }, [open]);
+  }, [open, initialFocusRef]);
 
   useEffect(() => {
     if (!open) {
@@ -444,7 +452,7 @@ export function ConfirmDialog({
       <section
         ref={panelRef}
         tabIndex={-1}
-        className={`operator-confirm-dialog__panel operator-confirm-dialog__panel--${tone}`}
+        className={`operator-confirm-dialog__panel operator-confirm-dialog__panel--${tone}${size === 'wide' ? ' operator-confirm-dialog__panel--wide' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -482,6 +490,7 @@ export function ConfirmDialog({
 }
 
 ConfirmDialog.propTypes = {
+  size: PropTypes.oneOf(['default', 'wide']),
   open: PropTypes.bool.isRequired,
   allowDismissWhileBusy: PropTypes.bool,
   title: PropTypes.string.isRequired,
@@ -492,6 +501,7 @@ ConfirmDialog.propTypes = {
   busy: PropTypes.bool,
   appearance: PropTypes.oneOf(['default', 'console']),
   confirmDisabled: PropTypes.bool,
+  initialFocusRef: PropTypes.shape({ current: PropTypes.any }),
   onConfirm: PropTypes.func.isRequired,
   onCancel: PropTypes.func.isRequired,
 };

@@ -10,12 +10,15 @@ the current state, risk, and next safe action obvious from a quick scan.
 
 Use this information hierarchy:
 
-1. Always visible: icon, status, count, short label, primary action.
-2. On hover, tap, or info affordance: meaning, cause, risk, secondary metadata.
+1. Always visible: aircraft identity, status, target count/scope, runtime mode,
+   stale or unknown evidence, primary action, and actionable partial/uncertain results.
+2. On hover, tap, or info affordance: supplementary meaning, cause, and secondary metadata.
 3. In linked docs or drill-down views: setup instructions, policy, full context.
 
 If a sentence explains policy or workflow, it usually belongs in a tooltip,
 expandable detail block, or guide, not as permanent page chrome.
+Action consequences and safety-critical uncertainty are exceptions: keep them
+visible at the decision point. Never require hover or color alone to recognize them.
 
 ## Required Page Structure
 
@@ -26,6 +29,10 @@ Top-level pages should use the shared operator primitives:
 - `MetricStrip` for compact summary counts.
 - `OperatorNotice` only for actionable state changes, warnings, or errors.
 - `EmptyState` for no-data, no-capability, and no-filter-result states.
+
+Overview uses the shared application shell with a dedicated flat fleet surface,
+view switch, inspector, and target/action rail. Do not force its aircraft into
+stacked generic cards merely to reproduce another page's composition.
 
 Mobile and tablet layouts are first-class. Primary actions remain visible;
 secondary actions collapse into an overflow menu.
@@ -53,7 +60,54 @@ Do not create separate pill/button systems for each page. If a page needs a new
 layout pattern, extend the shared primitive first and keep page CSS limited to
 local spacing.
 
+## Fleet And Mission Ownership
+
+Overview owns fleet awareness and general aircraft commands. Drone Show,
+Custom Show, Smart Swarm, and Swarm Trajectory own their mission execution in
+their dedicated workspaces; do not recreate mission launchers in Overview.
+Managed Return belongs to the relevant mission workspace. Overview Return is
+the immediate native return request, not that ordered workflow.
+
+Overview Board, List, and Map are deliberate views of the same fleet resource
+model, not simultaneous independently polling surfaces. Keep aircraft identity
+and ordering stable. Inspection is separate from command-target selection;
+changing a filter, view, or inspected aircraft must not retarget a command.
+Initialize a one-time snapshot of available configured aircraft only when the
+roster and heartbeat snapshot are known and no saved selection exists. Restore deliberate selections, including None, in
+their deployment/runtime/operator context; missing or invalid saved targets
+must never silently widen to All. The command-adjacent **To** chooser owns an
+explicit draft, applied with **Use N aircraft**; Cancel leaves scope unchanged.
+Its presets snapshot identities, never subscribe to availability or a cluster.
+Card bodies/markers inspect only; a distinct blue card checkbox edits the same
+recipient state as **To**, never the green readiness indicator. Lock recipient
+edits while a frozen action review is open. Smart Swarm reuses this chooser with
+a full-cluster preset; it does not subscribe targets to live availability.
+Its **To** choice covers Takeoff, Start and Managed Return; **Hold all** alone
+is explicitly whole-cluster. Persist exact choices in their browser-session,
+operator, runtime and cluster context. Carry forward only the accepted Takeoff
+payload, never cancelled edits or the pre-review roster. Show the selected/total
+count beside controls and retain named blocked/unavailable evidence while
+refreshing; only fresh native readiness may enable Start.
+The eye-marked **Show** tools affect visibility only. Hidden-recipient counts
+use actual rendered identities, including Map's current-position restriction.
+Keep essential command labels and identities visible; use symbols and hover/tap
+help for routine status, without hiding consequential actions behind hover.
+
+Widgets and the inspector consume the shared resource/model freshness and
+source labels. Failed polling must not freeze a fresh badge indefinitely.
+Unavailable evidence stays unavailable: armed alone does not prove airborne,
+and missing telemetry does not prove disarmed or landed. Do not invent readings
+or duplicate native readiness/command policy in a view component. See the
+[Dashboard Operator Guide](dashboard-operator.md) for the complete operator flow.
+
 ## Copy Standard
+
+Map and 3D aircraft details share `MapAircraftInspector`, with one bounded,
+scrollable viewport and an accessible identity/Close header. Do not recreate
+provider-specific popups with guessed content heights or frame-by-frame React
+position updates. Keep inspection identity separate from command targets; a new
+aircraft must not inherit an open action or jog review. Network icons/labels come
+from the reported transport, not IP ranges or the presence of a secondary radio.
 
 - Page subtitles should be one short sentence.
 - Buttons should use one or two words where practical.
@@ -69,6 +123,27 @@ helpers or inline notices so the screen never fills with repeated warnings.
 Persistent issues belong in `OperatorNotice` or the page state card.
 
 ## Visual Standard
+
+Modal focus must not open a touch keyboard just to review a selection. Shared
+dialogs keep initial text-field focus on fine-pointer desktops; on coarse-pointer
+devices they focus the dialog panel until the operator taps the field. Preserve
+focus trapping/return and the Cancel-first default for flight confirmations.
+Use input capability, not a second viewport breakpoint, for this behavior.
+
+Overview instruments are small SVG/CSS gauges, not additional controls: measured
+Wi-Fi arcs, real transport icons and a state-of-charge battery with its percentage
+inside. Zero, unknown and stale evidence must be visually distinct. Never derive
+charge from voltage or show a secondary Wi-Fi radio as the primary Ethernet link.
+Native hover hints, one dismissible keyboard-focus summary and the existing
+touch inspector expose details without adding tab stops per instrument. Keep
+the hint text stable; ticking ages belong in diagnostics, not hover labels.
+
+Routine link warning promotion/recovery is presentation-only (3 s / 2 s), driven
+by the existing fleet clock, not one timer per card. Unknown flight state and
+sample ages remain immediate; urgent conditions bypass settling. Do not conflate
+configuration refresh failure with loss of the telemetry source. Follow the
+[W3C hover/focus guidance](https://www.w3.org/WAI/WCAG22/Understanding/content-on-hover-or-focus.html)
+and [status message guidance](https://www.w3.org/WAI/WCAG22/Understanding/status-messages.html).
 
 - Use `DesignTokens.css` for colors, spacing, shadows, z-index, and typography.
 - Do not add hardcoded colors or numeric z-indexes in component CSS.
@@ -114,6 +189,25 @@ that resolves to a real repository guide. Production links must not fall back to
 SPA-local `docs/...` URLs that can 404 behind the dashboard server.
 
 ## Change Checklist
+
+### Formation capture
+
+Keep planning/capture workflow choices separate from editing commands. Place
+Revert with Undo/Redo, never use a setup selector as a disguised reset. Both
+workflows share one draft and retain explicit Use capture / Apply boundaries.
+
+Use a dominant read-only scene with identifiable aircraft silhouettes and one
+short primary action. Default to interactive 3D; expose flat views beside it,
+not as extra permanent panels. Mouse, touch and keyboard camera controls must
+never edit geometry. Distinguish frozen capture from advisory live estimates
+using shape/stroke, not color alone. Only the selected aircraft needs offset details.
+Keep leader/reference changes in progressive disclosure. Native whole-cluster
+capture evidence chooses contextual defaults; explicit operator selections survive
+Refresh. Never trade a silent height/role change for fewer clicks.
+
+These principles are informed by [Auterion's operator/advanced-feature separation](https://docs.auterion.com/hardware-integration/flight-controller-customization/amcs-advanced-mode)
+and [DJI Pilot's primary view with compact contextual controls](https://dl.djicdn.com/downloads/m200_v2/20200515/M200_Series_V2_User_Manual_en.pdf).
+They are design references, not evidence of MDS certification or equivalent safety.
 
 Before closing a frontend slice:
 

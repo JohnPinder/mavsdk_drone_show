@@ -37,13 +37,14 @@ import shutil
 import hashlib
 import threading
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Set, Tuple
+from typing import Dict, Any, Optional, List, Set, Tuple, Literal
 from urllib.parse import quote
 
 # FastAPI imports
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ConfigDict
@@ -51,21 +52,27 @@ import uvicorn
 import requests
 import asyncio
 import json
-from mavsdk.system import System
+from src.mavsdk_runtime import udp_listen_url
+from mavsdk_grpc.system import System
 
 from mds_logging import get_logger
 from mds_logging.api_schemas import (
+    LogSessionContentResponse,
     OnboardUlogCapability,
     OnboardUlogDownloadRequest,
     OnboardUlogJobDeleteResponse,
     OnboardUlogSummaryResponse,
 )
 from src.live_armability_contract import LiveArmabilityTrustEnvelope
+from src.async_stream_utils import managed_async_stream
+from src.latest_state_publisher import LatestStatePublisher, SubscriberLimitExceeded
+from src.px4_flight_modes import decode_px4_custom_mode, PX4_MAIN_MODE_AUTO
 from src.command_execution_contract import (
     DroneExecutionOutcome,
     format_pending_superseded_execution_error,
     is_legacy_schema_outcome_rejection,
     mission_requires_launch_armability_probe,
+    ground_start_observation_ready,
 )
 from src.launch_preparation_protocol import (
     LAUNCH_PREPARATION_TOKEN_HEADER,
@@ -77,6 +84,7 @@ from src.launch_preparation_protocol import (
     calculate_launch_preparation_token_ttl_sec,
     immutable_command_payload_sha256,
 )
+from src.mission_timing import SYNCHRONIZED_SHOW_EXECUTOR_MISSIONS, mission_commit_lead_seconds
 
 logger = get_logger("drone_api")
 
@@ -107,7 +115,13 @@ from src.command_admission import (
     evaluate_cached_hold_admission,
 )
 from src.smart_swarm_admission import SmartSwarmStartAdmission, evaluate_smart_swarm_start_admission
-from src.action_safety import SAFETY_EVIDENCE_VALIDITY_MS
+from src.trajectory_runtime_state import TrajectoryRuntimeState, read_trajectory_runtime
+from src.swarm_trajectory_contract import verify_local_package
+from src.action_safety import (
+    ACTION_STATE_OBSERVATION_TIMEOUT_SEC,
+    SAFETY_EVIDENCE_VALIDITY_MS,
+    observe_authoritative_vehicle_state,
+)
 from src.command_installation import (
     CommandInstallationRejected,
     CommandInstallationResult,
@@ -189,6 +203,7 @@ from src.px4_param_models import (
 from src.px4_params.service import Px4ParamService
 from src.ulog_service import (
     OnboardUlogService,
+    UlogCreateRejectedError,
     UlogServiceError,
     UlogTransportTimeoutError,
     UlogTransportUnavailableError,
@@ -235,8 +250,17 @@ class ReadinessMessageResponse(BaseModel):
 
 class DroneStateResponse(BaseModel):
     """Drone state response"""
+    hw_id: int = Field(ge=1)
+    telemetry_available: Optional[bool] = None
+    telemetry_error: Optional[str] = None
+    telemetry_last_update_age_ms: Optional[int] = None
+    telemetry_stale_threshold_ms: Optional[int] = None
     pos_id: Any
+    current_command_id: Optional[str] = None
     smart_swarm_start_admission: Optional[SmartSwarmStartAdmission] = None
+    smart_swarm_reference_admission: Optional[SmartSwarmStartAdmission] = None
+    smart_swarm_active: Optional[bool] = None
+    trajectory_execution: Optional[TrajectoryRuntimeState] = None
     detected_pos_id: Any
     state: int
     mission: Any
@@ -305,8 +329,23 @@ class DroneStateResponse(BaseModel):
     hdop: float
     vdop: float
     gps_fix_type: int
+    gps_report: Dict[str, Any] = Field(default_factory=dict)
     satellites_visible: int
     ip: str
+
+
+class SwarmCaptureActivity(BaseModel):
+    """Read-only local controller/action evidence, not a flight readiness gate."""
+    schema_version: Literal[1] = 1
+    state: int
+    mission: int
+    flight_mode: int
+    swarm_active: bool
+    heartbeat_timestamp_ms: int
+    is_armed: bool
+    landed_state: Optional[int] = None
+    landed_state_timestamp_ms: int
+    valid_for_ms: int = Field(ge=0)
 
 
 class SwarmStateResponse(BaseModel):
@@ -327,6 +366,8 @@ class SwarmStateResponse(BaseModel):
     stream_seq: int = 0
     global_position_valid: bool = False
     global_position_timestamp_ms: int = 0
+    gps_fix_type: int = 0
+    capture_activity: Optional[SwarmCaptureActivity] = None
     position_source: str = "unavailable"
     source_frame: str = "global_lla_ned"
     source_time_boot_ms: int = 0
@@ -427,6 +468,7 @@ class _LaunchCommitAdmission:
 class LiveArmabilityResponse(LiveArmabilityTrustEnvelope):
     """Full node response extending the shared trust-bearing envelope."""
 
+    coordinated_takeoff_supported: bool = True
     blockers: List[str] = Field(default_factory=list)
     armable: bool = False
     global_position_ok: bool = False
@@ -1023,6 +1065,7 @@ class DroneAPIServer:
             title="Drone API Server",
             description="High-performance API server for drone-side communication with HTTP REST and WebSocket support",
             version=MDS_VERSION,
+            lifespan=self._lifespan,
             docs_url="/docs",  # Interactive API docs
             redoc_url="/redoc",  # Alternative docs
             openapi_url="/openapi.json"  # OpenAPI schema
@@ -1043,6 +1086,15 @@ class DroneAPIServer:
 
         # WebSocket connection management
         self.active_websockets: List[WebSocket] = []
+        self._drone_state_publisher = LatestStatePublisher(
+            self._drone_stream_sample, interval=1.0,
+            error_payload=lambda: {"error": "Drone state not available", "timestamp": int(time.time() * 1000)},
+        )
+        stream_rate = max(1.0, safe_float(getattr(params, "SMART_SWARM_STATE_STREAM_RATE_HZ", 15), 15.0))
+        self._swarm_state_publisher = LatestStatePublisher(
+            self._swarm_stream_sample, interval=1.0 / stream_rate,
+            error_payload=lambda: {"error": "Swarm state not available", "emitted_at_ms": int(time.time() * 1000)},
+        )
         self.last_state_hash = None  # Track state changes
         self._live_probe_lock = asyncio.Lock()
         self._px4_param_lock = asyncio.Lock()
@@ -1077,19 +1129,14 @@ class DroneAPIServer:
         # Launch authority is deliberately process-local and short-lived. A
         # node restart invalidates every uncommitted preparation; the existing
         # command-history bound also caps token memory without a second knob.
-        def typed_nonnegative_setting(name: str, default: float) -> float:
-            raw = getattr(params, name, default)
-            if type(raw) not in {int, float} or not math.isfinite(float(raw)):
-                return default
-            return max(0.0, float(raw))
-
         self._launch_preparation_store = LaunchPreparationStore(
             ttl_sec=calculate_launch_preparation_token_ttl_sec(params=params),
             max_records=int(self._command_idempotency_max_records),
-            minimum_post_barrier_lead_sec=(
-                typed_nonnegative_setting("trigger_sooner_seconds", 0.0)
-                + typed_nonnegative_setting("COMMAND_SYNC_DISPATCH_GUARD_SEC", 1.0)
-            ),
+            minimum_post_barrier_lead_sec=mission_commit_lead_seconds(None, params=params),
+            minimum_post_barrier_lead_sec_by_mission={
+                mission.value: mission_commit_lead_seconds(mission, params=params)
+                for mission in SYNCHRONIZED_SHOW_EXECUTOR_MISSIONS
+            },
         )
         self._command_followup_tasks: Set[asyncio.Task] = set()
         self._command_followup_max_tasks = 32
@@ -1104,10 +1151,21 @@ class DroneAPIServer:
             hw_id=str(getattr(drone_config, "hw_id", "unknown")),
             pos_id=safe_int(getattr(drone_config, "pos_id", None), None),
         )
+        self._ulog_service.download_guard = self._assert_live_ulog_download_allowed
+        self._ulog_service.erase_guard = self._assert_live_ulog_erase_allowed
 
-        self.app.add_event_handler("shutdown", self._shutdown_ulog_download_tasks)
-        self.app.add_event_handler("shutdown", self._shutdown_command_followup_tasks)
         self.setup_routes()
+
+    @asynccontextmanager
+    async def _lifespan(self, _app: FastAPI):
+        """Retain ordered task cleanup without removed application event APIs."""
+        try:
+            yield
+        finally:
+            await self._drone_state_publisher.close()
+            await self._swarm_state_publisher.close()
+            await self._shutdown_ulog_download_tasks()
+            await self._shutdown_command_followup_tasks()
 
     def _bounded_numeric_param(
         self,
@@ -1238,7 +1296,7 @@ class DroneAPIServer:
             NetworkDefaults.GRPC_BASE_PORT,
         )
         mavlink_port = safe_int(getattr(self.params, "mavsdk_port", 14540), 14540)
-        return grpc_port, f"udp://:{mavlink_port}"
+        return grpc_port, udp_listen_url(mavlink_port)
 
     @staticmethod
     def _port_is_open(port: int, host: str = "127.0.0.1", timeout: float = 0.2) -> bool:
@@ -1496,6 +1554,11 @@ class DroneAPIServer:
         message = str(exc) or exc.__class__.__name__
         lowered = message.lower()
 
+        if isinstance(exc, ValueError):
+            return HTTPException(status_code=409, detail={
+                "error": "px4_params_precondition_failed", "message": message, "action": action,
+            })
+
         if self._is_mavsdk_dependency_error(exc):
             error = capability.get("missing_dependency") or "mavsdk_server_unavailable"
             return HTTPException(
@@ -1541,7 +1604,7 @@ class DroneAPIServer:
 
         mavsdk_server_path = self._find_mavsdk_server_binary()
         process = subprocess.Popen(
-            [mavsdk_server_path, "-p", str(grpc_port), f"udp://:{udp_port}"],
+            [mavsdk_server_path, "-p", str(grpc_port), udp_listen_url(udp_port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -1577,22 +1640,21 @@ class DroneAPIServer:
             5.0,
         )
         deadline = time.monotonic() + connect_timeout
-        connection_iter = drone.core.connection_state().__aiter__()
+        async with managed_async_stream(drone.core.connection_state) as connection_iter:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for local MAVSDK connection.")
 
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Timed out waiting for local MAVSDK connection.")
+                try:
+                    state = await asyncio.wait_for(connection_iter.__anext__(), timeout=min(1.0, remaining))
+                except asyncio.TimeoutError:
+                    continue
+                except StopAsyncIteration as exc:
+                    raise RuntimeError("MAVSDK connection stream ended before connection was confirmed.") from exc
 
-            try:
-                state = await asyncio.wait_for(connection_iter.__anext__(), timeout=min(1.0, remaining))
-            except asyncio.TimeoutError:
-                continue
-            except StopAsyncIteration as exc:
-                raise RuntimeError("MAVSDK connection stream ended before connection was confirmed.") from exc
-
-            if state.is_connected:
-                return
+                if state.is_connected:
+                    return
 
     async def _probe_live_armability(self, require_global_position: bool = True, mission_type: int | None = None) -> Dict[str, Any]:
         probe_started_monotonic = time.monotonic()
@@ -1777,9 +1839,10 @@ class DroneAPIServer:
     async def _run_ulog_download_job(self, job_id: str) -> None:
         """Complete a queued onboard ULog download in the background."""
         try:
-            await self._with_local_ulog_system(
-                lambda drone: self._ulog_service.perform_download(drone, job_id)
-            )
+            async def download(drone):
+                await self._assert_live_ulog_download_allowed(drone)
+                return await self._ulog_service.perform_download(drone, job_id)
+            await self._with_local_ulog_system(download)
         except asyncio.CancelledError:
             await self._ulog_service.mark_job_failed(job_id, "ULog download cancelled during shutdown")
             raise
@@ -1804,15 +1867,41 @@ class DroneAPIServer:
         require_disarmed = bool(
             getattr(self.params, "PX4_PARAMETER_MUTATION_REQUIRE_DISARMED", True)
         )
-        if require_disarmed and bool(getattr(self.drone_config, "is_armed", False)):
+        if require_disarmed and getattr(self.drone_config, "is_armed", None) is True:
             raise HTTPException(
                 status_code=409,
                 detail="PX4 parameter writes are blocked while the vehicle is armed.",
             )
 
+    async def _assert_live_px4_param_mutation_allowed(self, drone) -> None:
+        """Confirm only the existing disarmed policy, from a native live sample.
+
+        The cached state's initial False is not evidence of disarm. This is not
+        a GPS/health/landed-state admission gate and does not alter flight policy.
+        """
+        if not self._px4_param_service.build_policy().mutations.require_disarmed:
+            return
+        self._assert_px4_param_mutation_allowed()
+        stream = None
+        try:
+            stream = drone.telemetry.armed()
+            armed = await asyncio.wait_for(anext(stream), timeout=3.0)
+            if type(armed) is not bool:
+                raise ValueError("arm state is unavailable")
+            if armed:
+                raise ValueError("vehicle is armed")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"PX4 parameter writes require confirmed live disarm: {exc}",
+            ) from exc
+        finally:
+            if stream is not None and callable(getattr(stream, "aclose", None)):
+                await stream.aclose()
+
     def _assert_ulog_download_allowed(self) -> None:
         require_disarmed = bool(getattr(self.params, "ULOG_DOWNLOAD_REQUIRE_DISARMED", True))
-        if require_disarmed and bool(getattr(self.drone_config, "is_armed", False)):
+        if require_disarmed and getattr(self.drone_config, "is_armed", None) is True:
             raise HTTPException(
                 status_code=409,
                 detail="Onboard ULog download is blocked while the vehicle is armed.",
@@ -1820,11 +1909,69 @@ class DroneAPIServer:
 
     def _assert_ulog_erase_allowed(self) -> None:
         require_disarmed = bool(getattr(self.params, "ULOG_ERASE_REQUIRE_DISARMED", True))
-        if require_disarmed and bool(getattr(self.drone_config, "is_armed", False)):
+        if require_disarmed and getattr(self.drone_config, "is_armed", None) is True:
             raise HTTPException(
                 status_code=409,
                 detail="Onboard ULog erase-all is blocked while the vehicle is armed.",
             )
+
+    async def _assert_live_ulog_download_allowed(self, drone) -> None:
+        await self._assert_live_ulog_disarmed(drone, "ULOG_DOWNLOAD_REQUIRE_DISARMED", "download/staging")
+
+    async def _assert_live_ulog_erase_allowed(self, drone) -> None:
+        await self._assert_live_ulog_disarmed(drone, "ULOG_ERASE_REQUIRE_DISARMED", "erase-all")
+
+    async def _assert_live_ulog_disarmed(self, drone, policy_name: str, operation: str) -> None:
+        """Existing disarm policy, confirmed natively without GPS/health gates.
+
+        Filesystem fallback may use the current raw autopilot heartbeat already
+        received by this node. The initialized/derived is_armed=False is never
+        evidence: some legacy mode handling can clear it despite an armed bit.
+        """
+        if not bool(getattr(self.params, policy_name, True)):
+            return
+        observation = None
+        observation_error = None
+        try:
+            observation = await observe_authoritative_vehicle_state(
+                drone, timeout=ACTION_STATE_OBSERVATION_TIMEOUT_SEC, required_fields=("armed",),
+            )
+        except Exception as exc:
+            observation_error = str(exc)[:256] or type(exc).__name__
+        if observation is not None:
+            if observation.complete and observation.armed is False:
+                return
+            if observation.armed is True:
+                raise HTTPException(status_code=409, detail={
+                    "code": "ulog_vehicle_armed", "error": "ulog_vehicle_armed",
+                    "message": f"Onboard ULog {operation} is blocked while the vehicle is armed.",
+                    "operation": operation, "observation": observation.as_dict(),
+                })
+        heartbeat = getattr(self.drone_config, "heartbeat_timestamp_ms", None)
+        base_mode = getattr(self.drone_config, "base_mode", None)
+        now_ms = time.time_ns() // 1_000_000
+        raw_heartbeat_fresh = (
+            type(heartbeat) in (int, float) and math.isfinite(heartbeat)
+            and heartbeat > 0 and 0 <= now_ms - heartbeat <= SAFETY_EVIDENCE_VALIDITY_MS
+            and type(base_mode) is int and 0 <= base_mode <= 255
+        )
+        fallback_available = bool(self._ulog_service.filesystem_fallback_dirs())
+        if fallback_available and raw_heartbeat_fresh and not (base_mode & 128):
+            return
+        if fallback_available and raw_heartbeat_fresh and base_mode & 128:
+            raise HTTPException(status_code=409, detail={
+                "code": "ulog_vehicle_armed", "error": "ulog_vehicle_armed",
+                "message": f"Onboard ULog {operation} is blocked: the fresh native heartbeat reports armed.",
+                "operation": operation, "local_heartbeat_fresh": True,
+            })
+        raise HTTPException(status_code=409, detail={
+            "code": "ulog_disarm_unconfirmed", "error": "ulog_disarm_unconfirmed",
+            "message": f"Onboard ULog {operation} requires confirmed fresh native disarm; unknown state is not disarmed.",
+            "operation": operation,
+            "observation": observation.as_dict() if observation is not None else None,
+            "observation_error": observation_error,
+            "local_heartbeat_fresh": raw_heartbeat_fresh,
+        })
 
     def _require_ulog_machine_credential(
         self,
@@ -1907,6 +2054,10 @@ class DroneAPIServer:
             )
 
         command_data = command.model_dump(mode="json", exclude_none=True)
+        if command_data.get("takeoff_mode") == "coordinated" and not command_data.get("command_report_capability"):
+            return _LaunchCommitAdmission(command=command, launch_required=True, authorized=False,
+                error_code=CommandErrorCode.INVALID_FORMAT.value,
+                error_detail="Coordinated Takeoff requires command-bound callback authority")
         command_id = command_data.get("command_id")
         if type(command_id) is str and command_id:
             semantic_identity = self._command_semantic_identity(command_data)
@@ -1935,6 +2086,14 @@ class DroneAPIServer:
                             else "Command ID already exists with a different canonical payload"
                         ),
                     )
+
+        if mission_type == Mission.SWARM_TRAJECTORY.value:
+            try:
+                await asyncio.to_thread(verify_local_package, command.swarm_trajectory,
+                    str(self.drone_config.hw_id), self.params.get_swarm_trajectory_file_path(self.drone_config.hw_id))
+            except ValueError as exc:
+                return _LaunchCommitAdmission(command=command, launch_required=True, authorized=False,
+                    error_code=CommandErrorCode.PREFLIGHT_FAILED.value, error_detail=str(exc))
 
         preparation_result = self._launch_preparation_store.consume(
             launch_preparation_token,
@@ -2022,6 +2181,12 @@ class DroneAPIServer:
                     "Commit-time readiness did not prove the required global-position policy"
                 ),
             )
+        if not ground_start_observation_ready(mission_type, envelope.observation):
+            return _LaunchCommitAdmission(
+                command=command, launch_required=True, authorized=False,
+                error_code=CommandErrorCode.PREFLIGHT_FAILED.value,
+                error_detail='Commit-time ground-start readiness was not confirmed for this mission',
+            )
         if not envelope.ready:
             blockers = (
                 envelope.observation.blockers
@@ -2060,6 +2225,7 @@ class DroneAPIServer:
     def _serialize_drone_state_payload(self, drone_state: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize raw communicator state into the canonical HTTP/WebSocket payload shape."""
         payload = dict(drone_state)
+        payload['current_command_id'] = self._effective_control_command_id()
         server_time_ms = int(time.time() * 1000)
         raw_update_time = payload.get('update_time')
         try:
@@ -2067,21 +2233,68 @@ class DroneAPIServer:
         except (TypeError, ValueError):
             numeric_update_time = 0.0
 
-        if numeric_update_time > 0:
+        if math.isfinite(numeric_update_time) and numeric_update_time > 0:
             if numeric_update_time < 1_000_000_000_000:
                 payload['timestamp'] = int(numeric_update_time * 1000)
             else:
                 payload['timestamp'] = int(numeric_update_time)
         else:
-            payload['timestamp'] = server_time_ms
+            # Publication/receipt is not a native FC sample. Preserve missing
+            # source time instead of making an uninitialized aircraft fresh.
+            payload['timestamp'] = 0
 
         payload['server_time'] = server_time_ms
+        payload['trajectory_execution'] = read_trajectory_runtime(
+            command_id=getattr(self.drone_config, 'current_command_id', None) or '')
         payload['smart_swarm_start_admission'] = evaluate_smart_swarm_start_admission(
             self.drone_config,
             max_age_sec=self.params.LOCAL_MAVLINK_STALE_TIMEOUT_SEC,
             now_ms=server_time_ms,
         ).model_dump()
+        payload['smart_swarm_reference_admission'] = evaluate_smart_swarm_start_admission(
+            self.drone_config, max_age_sec=self.params.LOCAL_MAVLINK_STALE_TIMEOUT_SEC,
+            now_ms=server_time_ms, reference=True,
+        ).model_dump()
         return DroneStateResponse.model_validate(payload).model_dump()
+
+    def _drone_stream_sample(self):
+        state = self.drone_communicator.get_drone_state()
+        if not state:
+            return {"error": "Drone state not available", "timestamp": int(time.time() * 1000)}
+        return self._serialize_drone_state_payload(state)
+
+    def _swarm_stream_sample(self):
+        state = self.drone_communicator.get_swarm_state()
+        if not state:
+            return {"error": "Swarm state not available", "emitted_at_ms": int(time.time() * 1000)}
+        return self._serialize_swarm_state_payload(state)
+
+    def _effective_control_command_id(self) -> Optional[str]:
+        """Queued command authority takes precedence over an older subprocess."""
+        current = getattr(self.drone_config, "current_command_id", None)
+        if isinstance(current, str) and current:
+            return current
+        setup = getattr(self.drone_config, "drone_setup", None)
+        active = getattr(setup, "_active_mission_command_id", None)
+        return active if isinstance(active, str) and active else None
+
+    def _conditional_takeoff_hold_ready(self, expected: str) -> bool:
+        """Pure native snapshot fence, called under the command transaction lock."""
+        config = self.drone_config
+        if self._effective_control_command_id() != expected or int(config.mission) != Mission.TAKE_OFF.value:
+            return False
+        now = int(time.time() * 1000)
+        for field in ("heartbeat_timestamp_ms", "landed_state_timestamp_ms"):
+            timestamp = getattr(config, field, None)
+            if type(timestamp) not in (int, float) or not 0 <= now - timestamp <= 1000:
+                return False
+        try:
+            main, sub = decode_px4_custom_mode(getattr(config, "custom_mode", None))
+        except (TypeError, ValueError):
+            return False
+        return (getattr(config, "is_armed", None) is True
+            and getattr(config, "landed_state", None) in (2, 3)
+            and main == PX4_MAIN_MODE_AUTO and sub in (2, 10))
 
     @staticmethod
     def _serialize_swarm_state_payload(swarm_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -2145,6 +2358,7 @@ class DroneAPIServer:
             if target_hw_id != local_hw_id:
                 return LaunchPreparationResponse(
                     status="rejected",
+                    coordinated_takeoff_supported=True,
                     command_id=command_id,
                     target_hw_id=local_hw_id,
                     mission_type=command.mission_type,
@@ -2163,6 +2377,13 @@ class DroneAPIServer:
                     ),
                 )
 
+            if command.mission_type == Mission.SWARM_TRAJECTORY.value:
+                try:
+                    await asyncio.to_thread(verify_local_package, command.swarm_trajectory,
+                        local_hw_id, self.params.get_swarm_trajectory_file_path(local_hw_id))
+                except ValueError as exc:
+                    raise HTTPException(409, detail={'error_code': CommandErrorCode.PREFLIGHT_FAILED.value,
+                        'message': str(exc), 'error_detail': 'No launch token was issued'}) from exc
             try:
                 probe = await self._probe_live_armability(
                     require_global_position=request.require_global_position,
@@ -2190,6 +2411,7 @@ class DroneAPIServer:
             if envelope.hw_id != local_hw_id:
                 return LaunchPreparationResponse(
                     status="rejected",
+                    coordinated_takeoff_supported=True,
                     command_id=command_id,
                     target_hw_id=local_hw_id,
                     mission_type=command.mission_type,
@@ -2211,6 +2433,7 @@ class DroneAPIServer:
             if not envelope.ready:
                 return LaunchPreparationResponse(
                     status="rejected",
+                    coordinated_takeoff_supported=True,
                     command_id=command_id,
                     target_hw_id=local_hw_id,
                     mission_type=command.mission_type,
@@ -2226,7 +2449,7 @@ class DroneAPIServer:
                     ),
                     error_code=CommandErrorCode.PREFLIGHT_FAILED.value,
                     error_detail=(
-                        "; ".join(envelope.observation.blockers)
+                        "; ".join(envelope.observation.blockers if envelope.observation else envelope.blockers)
                         or "Current PX4 launch readiness conditions were not met"
                     ),
                 )
@@ -2244,6 +2467,13 @@ class DroneAPIServer:
                         "error_detail": "No launch token was issued",
                     },
                 )
+
+            if not ground_start_observation_ready(command.mission_type, envelope.observation):
+                raise HTTPException(status_code=503, detail={
+                    'error_code': CommandErrorCode.PREFLIGHT_FAILED.value,
+                    'message': 'Ground-start readiness was not confirmed for this mission',
+                    'error_detail': 'No launch token was issued',
+                })
 
             try:
                 binding = LaunchPreparationBinding.from_command(command)
@@ -2282,6 +2512,7 @@ class DroneAPIServer:
 
             return LaunchPreparationResponse(
                 status="prepared",
+                coordinated_takeoff_supported=True,
                 command_id=command_id,
                 target_hw_id=local_hw_id,
                 mission_type=command.mission_type,
@@ -2566,6 +2797,17 @@ class DroneAPIServer:
                     )
 
                 previous_command_id = state_snapshot.command_id
+                expected_control = command_data.get("expected_control_command_id")
+                if expected_control is not None and not self._conditional_takeoff_hold_ready(expected_control):
+                    response = CommandAckResponse(status="rejected", command_id=command_id,
+                        hw_id=hw_id, pos_id=pos_id, current_state=current_state,
+                        mission_type=mission_type, trigger_time=trigger_time,
+                        message="Takeoff recovery no longer owns this aircraft; no Hold command sent",
+                        error_code=CommandErrorCode.INVALID_FORMAT.value,
+                        error_detail="Original command or fresh native Takeoff control changed",
+                        timestamp=timestamp)
+                    return self._finalize_command_idempotency(idempotency_record, response,
+                        phase="rejected", outcome="rejected")
                 superseded_pending_command = (
                     current_state == State.MISSION_READY.value
                     and previous_command_id
@@ -3230,10 +3472,13 @@ class DroneAPIServer:
         @self.app.patch(DRONE_PX4_PARAM_VALUE_ROUTE_TEMPLATE, response_model=Px4ParamSetResponse)
         async def set_px4_param_value(name: str, request: Px4ParamSetRequest):
             """Write one PX4 parameter and optionally verify readback."""
-            self._assert_px4_param_mutation_allowed()
+            if request.operation_id is None:
+                self._assert_px4_param_mutation_allowed()
             try:
                 response = await self._with_local_mavsdk_system(
-                    lambda drone: self._px4_param_service.set_param_value(drone, name, request)
+                    lambda drone: self._px4_param_service.set_param_value(
+                        drone, name, request, mutation_guard=self._assert_live_px4_param_mutation_allowed,
+                    )
                 )
                 self._px4_param_snapshot_cache = None
                 return response
@@ -3246,10 +3491,13 @@ class DroneAPIServer:
         @self.app.post(DRONE_PX4_PARAMS_PATCH_APPLY_ROUTE, response_model=Px4ParamPatchApplyResponse)
         async def apply_px4_param_patch(request: Px4ParamPatchApplyRequest):
             """Apply a batch parameter patch to the local PX4 vehicle."""
-            self._assert_px4_param_mutation_allowed()
+            if request.operation_id is None:
+                self._assert_px4_param_mutation_allowed()
             try:
                 response = await self._with_local_mavsdk_system(
-                    lambda drone: self._px4_param_service.apply_patch(drone, request)
+                    lambda drone: self._px4_param_service.apply_patch(
+                        drone, request, mutation_guard=self._assert_live_px4_param_mutation_allowed,
+                    )
                 )
                 self._px4_param_snapshot_cache = None
                 return response
@@ -3301,13 +3549,14 @@ class DroneAPIServer:
             )
             self._assert_ulog_download_allowed()
             try:
-                return await self._with_local_ulog_system(
-                    lambda drone: self._ulog_service.summarize_entry(
+                async def summarize(drone):
+                    await self._assert_live_ulog_download_allowed(drone)
+                    return await self._ulog_service.summarize_entry(
                         drone,
                         int(log_id),
                         OnboardUlogDownloadRequest(pos_id=safe_int(getattr(self.drone_config, "pos_id", None), None)),
                     )
-                )
+                return await self._with_local_ulog_system(summarize)
             except UlogServiceError as exc:
                 raise self._ulog_failure_http_exception("summarize_ulog", exc) from exc
             except FileNotFoundError as exc:
@@ -3341,24 +3590,50 @@ class DroneAPIServer:
                 http_request,
                 operation=ULOG_OP_DOWNLOAD_CREATE,
             )
-            self._assert_ulog_download_allowed()
             if not ulog_job_token:
                 raise HTTPException(
                     status_code=401,
                     detail="ULog download job capability is required.",
                 )
             download_request = request or OnboardUlogDownloadRequest()
+            async def reject_guard_failure(exc):
+                if not download_request.request_id:
+                    raise exc  # Direct legacy callers have no recoverable request identity.
+                detail = exc.detail
+                message = (detail.get("message") or detail.get("error") or str(detail)) if isinstance(detail, dict) else str(detail)
+                proof = await self._ulog_service.reject_download_request(
+                    int(log_id), download_request, access_token=ulog_job_token, message=message,
+                )
+                if proof is not None:
+                    raise HTTPException(status_code=exc.status_code, detail=proof) from exc
+                raise exc  # Existing/inflight identities cannot be proved unaccepted.
             try:
-                job_response = await self._with_local_ulog_system(
-                    lambda drone: self._ulog_service.create_download_job(
+                existing = await self._ulog_service.get_request_job(
+                    int(log_id), download_request, access_token=ulog_job_token,
+                )
+                if existing is not None:
+                    return existing  # Recovery is lookup-only, not another stage request.
+                try:
+                    self._assert_ulog_download_allowed()
+                except HTTPException as exc:
+                    await reject_guard_failure(exc)
+                async def create(drone):
+                    try:
+                        await self._assert_live_ulog_download_allowed(drone)
+                    except HTTPException as exc:
+                        await reject_guard_failure(exc)
+                    return await self._ulog_service.create_download_job(
                         drone,
                         int(log_id),
                         download_request,
                         access_token=ulog_job_token,
                     )
-                )
-                self._start_ulog_download_task(job_response.job.job_id)
+                job_response = await self._with_local_ulog_system(create)
+                if await self._ulog_service.claim_download_start(job_response.job.job_id):
+                    self._start_ulog_download_task(job_response.job.job_id)
                 return job_response
+            except UlogCreateRejectedError as exc:
+                raise HTTPException(status_code=409, detail=exc.rejection_detail) from exc
             except UlogServiceError as exc:
                 raise self._ulog_failure_http_exception(
                     "create_ulog_download",
@@ -3496,12 +3771,13 @@ class DroneAPIServer:
             )
             self._assert_ulog_erase_allowed()
             try:
-                return await self._with_local_ulog_system(
-                    lambda drone: self._ulog_service.erase_all(
+                async def erase(drone):
+                    await self._assert_live_ulog_erase_allowed(drone)
+                    return await self._ulog_service.erase_all(
                         drone,
                         pos_id=safe_int(getattr(self.drone_config, "pos_id", None), None),
                     )
-                )
+                return await self._with_local_ulog_system(erase)
             except HTTPException:
                 raise
             except Exception as exc:
@@ -3543,34 +3819,17 @@ class DroneAPIServer:
 
             The endpoint sends state updates at 1 Hz (configurable).
             """
-            await websocket.accept()
-            self.active_websockets.append(websocket)
-
-            logger.info(f"WebSocket client connected from {websocket.client.host}")
-            logger.info(f"Active WebSocket connections: {len(self.active_websockets)}")
-
             try:
-                while True:
-                    # Get current drone state
-                    drone_state = self.drone_communicator.get_drone_state()
-
-                    if drone_state:
-                        # Send state to client
-                        await websocket.send_json(self._serialize_drone_state_payload(drone_state))
-                    else:
-                        # Send error message if state not available
-                        await websocket.send_json({
-                            "error": "Drone state not available",
-                            "timestamp": int(time.time() * 1000)
-                        })
-
-                    # Update interval: 1 Hz (can be adjusted based on requirements)
-                    # For higher frequency: 0.1 (10 Hz) or 0.05 (20 Hz)
-                    # For lower frequency: 2 (0.5 Hz) or 5 (0.2 Hz)
-                    await asyncio.sleep(1.0)
-
+                async with self._drone_state_publisher.subscribe() as updates:
+                    await websocket.accept()
+                    self.active_websockets.append(websocket)
+                    await self._drone_state_publisher.send(updates, websocket, timeout=3.0)
+            except SubscriberLimitExceeded:
+                await websocket.close(code=1013)
             except WebSocketDisconnect:
                 logger.info(f"WebSocket client disconnected from {websocket.client.host}")
+            except asyncio.TimeoutError:
+                await websocket.close(code=1013)
             except Exception as e:
                 logger.error(f"WebSocket error: {e}")
             finally:
@@ -3582,23 +3841,16 @@ class DroneAPIServer:
         @self.app.websocket(DRONE_WS_SWARM_STATE_ROUTE)
         async def websocket_swarm_state(websocket: WebSocket):
             """Dedicated Smart Swarm leader-state stream for follower control."""
-            await websocket.accept()
-            rate_hz = max(1.0, safe_float(getattr(self.params, "SMART_SWARM_STATE_STREAM_RATE_HZ", 15), 15.0))
-            interval = 1.0 / rate_hz
-
             try:
-                while True:
-                    swarm_state = self.drone_communicator.get_swarm_state()
-                    if swarm_state:
-                        await websocket.send_json(self._serialize_swarm_state_payload(swarm_state))
-                    else:
-                        await websocket.send_json({
-                            "error": "Swarm state not available",
-                            "emitted_at_ms": int(time.time() * 1000),
-                        })
-                    await asyncio.sleep(interval)
+                async with self._swarm_state_publisher.subscribe() as updates:
+                    await websocket.accept()
+                    await self._swarm_state_publisher.send(updates, websocket, timeout=0.75)
+            except SubscriberLimitExceeded:
+                await websocket.close(code=1013)
             except WebSocketDisconnect:
                 logger.info("Smart Swarm WebSocket client disconnected")
+            except asyncio.TimeoutError:
+                await websocket.close(code=1013)
             except Exception as exc:
                 logger.error(f"Smart Swarm WebSocket error: {exc}")
 
@@ -3611,48 +3863,48 @@ class DroneAPIServer:
             """List available log sessions on this drone."""
             from mds_logging.session import list_sessions
             from mds_logging.constants import get_log_dir
-            sessions = list_sessions(get_log_dir())
+            sessions = await asyncio.to_thread(list_sessions, get_log_dir())
             return {"sessions": sessions}
 
-        @self.app.get("/api/logs/sessions/{session_id}")
+        @self.app.get("/api/logs/sessions/{session_id}", response_model=LogSessionContentResponse)
         async def get_log_session(
             session_id: str,
             level: Optional[str] = None,
             component: Optional[str] = None,
-            limit: Optional[int] = None,
-            offset: int = 0,
+            limit: int = Query(500, ge=1, le=2000),
+            offset: int = Query(0, ge=0, le=100000),
             since: Optional[str] = None,
+            until: Optional[str] = None,
+            search: Optional[str] = Query(None, max_length=256),
+            cursor: Optional[str] = Query(None, max_length=4096),
         ):
             """Retrieve filtered JSONL content from a log session."""
-            from mds_logging.session import read_session_lines
+            from mds_logging.session_query import LogQueryError, read_session_page
             from mds_logging.constants import get_log_dir
-            lines = read_session_lines(
-                get_log_dir(), session_id,
-                level=level, component=component, limit=limit, offset=offset,
-                since=since,
-            )
-            if lines is None:
+            try:
+                page = await asyncio.to_thread(read_session_page, get_log_dir(), session_id,
+                    level=level, component=component, limit=limit, offset=offset,
+                    since=since, until=until, search=search, cursor=cursor)
+            except LogQueryError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            if page is None:
                 raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
-            return {"session_id": session_id, "count": len(lines), "lines": lines}
+            return page
 
         @self.app.get("/api/logs/stream")
         async def stream_logs(
+            request: Request,
             level: Optional[str] = None,
             component: Optional[str] = None,
             source: Optional[str] = None,
         ):
             """Stream current session logs in real-time via SSE."""
-            import json as _json
             from mds_logging.watcher import get_watcher
-
-            async def event_generator():
-                async for entry in get_watcher().subscribe(
-                    level=level, component=component, source=source,
-                ):
-                    yield f"data: {_json.dumps(entry)}\n\n"
+            from mds_logging.streaming import sse_log_stream
 
             return StreamingResponse(
-                event_generator(),
+                sse_log_stream(get_watcher(), last_event_id=request.headers.get("last-event-id"),
+                               level=level, component=component, source=source),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -4854,6 +5106,12 @@ class DroneAPIServer:
             app=self.app,
             host=host,
             port=port,
+            # This server shares a multithreaded process with native gRPC and
+            # the mission scheduler. Auto/uvloop installs a process-wide loop
+            # policy from this thread; libuv's fork can then hang in gRPC's
+            # child at-fork handler before a recovery controller execs. Keep
+            # the standard asyncio subprocess path and its FD/session contract.
+            loop="asyncio",
             log_level="info" if self.params.env_mode == 'development' else "warning",
             access_log=self.params.env_mode == 'development',
             reload=False  # No auto-reload for embedded systems

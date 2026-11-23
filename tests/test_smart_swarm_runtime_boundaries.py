@@ -13,15 +13,90 @@ import subprocess
 import sys
 import time
 import types
+from contextlib import asynccontextmanager
 from unittest.mock import Mock
 from unittest.mock import AsyncMock
 
 import pytest
 from smart_swarm_src.control_authority import ControlAuthority
+from smart_swarm_src.assignment_recovery import LocalRecoveryOverride
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SIGNAL_HARNESS = REPO_ROOT / "tests" / "helpers" / "smart_swarm_signal_harness.py"
+
+
+@pytest.mark.asyncio
+async def test_formation_installs_reference_before_starting_new_follower(swarm_runtime, monkeypatch):
+    runtime = swarm_runtime
+    target = [{'hw_id': 1, 'follow': 0},
+              {'hw_id': 2, 'follow': 1, 'offset_x': 12, 'offset_y': -3, 'offset_z': 2, 'frame': 'body'}]
+
+    class Subscription:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        @asynccontextmanager
+        async def run(self):
+            yield self
+        async def updates(self):
+            yield target
+
+    monkeypatch.setattr(runtime, 'FormationSubscription', Subscription)
+    monkeypatch.setattr(runtime, 'HW_ID', 2)
+    monkeypatch.setattr(runtime, 'DRONE_CONFIG', {'2': {'ip': 'node2'}})
+    monkeypatch.setattr(runtime, 'SWARM_CONFIG', {})
+    monkeypatch.setattr(runtime, 'IS_LEADER', True)
+    monkeypatch.setattr(runtime, 'LEADER_FAILOVER_IN_PROGRESS', False)
+    monkeypatch.setattr(runtime, 'RECOVERY_OVERRIDE', LocalRecoveryOverride())
+    monkeypatch.setattr(runtime, 'OFFSETS', {'x': 1, 'y': 0, 'z': 0})
+    monkeypatch.setattr(runtime, 'FRAME', 'ned')
+    publish = Mock()
+    monkeypatch.setattr(runtime, 'publish_runtime_assignment', publish)
+
+    async def become_follower(*_args):
+        assert runtime.OFFSETS == {'x': 12, 'y': -3, 'z': 2}
+        assert runtime.FRAME == 'body'
+        publish.assert_not_called()
+        await asyncio.sleep(0)
+        runtime.IS_LEADER = False
+        runtime.LEADER_HW_ID = '1'
+        return True
+
+    monkeypatch.setattr(runtime, 'transition_to_follower_mode', become_follower)
+    await runtime.update_swarm_config_periodically(object())
+    publish.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_subscription_preserves_local_recovery_override(swarm_runtime, monkeypatch):
+    runtime = swarm_runtime
+    target = runtime.parse_swarm_entries(runtime.normalize_topology([
+        {'hw_id': 1, 'follow': 0}, {'hw_id': 2, 'follow': 1, 'offset_x': 6}]))
+    recovery = LocalRecoveryOverride()
+    recovery.remember(target['2'], {**target['2'], 'follow': 0})
+    class Subscription:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        @asynccontextmanager
+        async def run(self):
+            yield self
+        async def updates(self):
+            yield list(target.values())
+    monkeypatch.setattr(runtime, 'FormationSubscription', Subscription)
+    monkeypatch.setattr(runtime, 'HW_ID', 2)
+    monkeypatch.setattr(runtime, 'DRONE_CONFIG', {'2': {"ip": "node2"}})
+    monkeypatch.setattr(runtime, 'SWARM_CONFIG', {})
+    monkeypatch.setattr(runtime, 'RECOVERY_OVERRIDE', recovery)
+    monkeypatch.setattr(runtime, 'LEADER_FAILOVER_IN_PROGRESS', False)
+    monkeypatch.setattr(runtime, 'IS_LEADER', True)
+    monkeypatch.setattr(runtime, 'OFFSETS', {'x': 6, 'y': 0, 'z': 0})
+    monkeypatch.setattr(runtime, 'FRAME', 'ned')
+    monkeypatch.setattr(runtime, 'publish_runtime_assignment', Mock())
+    transition = AsyncMock()
+    monkeypatch.setattr(runtime, 'transition_to_follower_mode', transition)
+    await runtime.update_swarm_config_periodically(object())
+    transition.assert_not_awaited()
+    assert runtime.SWARM_CONFIG['2']['follow'] == 0
 
 
 @pytest.fixture(scope="module")
@@ -209,6 +284,59 @@ def test_apply_leader_state_sample_rejects_frozen_motion_timestamp_on_fresh_pack
     assert swarm_runtime.LEADER_STATE["pos_n"] == pytest.approx(0.0, abs=1e-6)
 
 
+@pytest.mark.asyncio
+async def test_pending_http_reply_cannot_undo_newer_stream_motion_during_handover(
+    swarm_runtime, monkeypatch,
+):
+    from smart_swarm_src.leader_transport import LeaderStateSupervisor, LeaderTransportPolicy
+
+    now_ms = 1_800_000_000_200
+    monkeypatch.setattr(swarm_runtime, "time", types.SimpleNamespace(
+        time=lambda: now_ms / 1000.0, monotonic=lambda: 42.2))
+    started, release, offered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    old_http = _valid_global_sample(now_ms - 200)
+    newer_ws = _valid_global_sample(now_ms)
+    newer_ws.update(stream_seq=8, position_lat=47.397752)
+    accepted = []
+
+    class Client:
+        @asynccontextmanager
+        async def get(self, *_args, **_kwargs):
+            async def json():
+                started.set()
+                await release.wait()
+                return old_http
+            yield types.SimpleNamespace(raise_for_status=lambda: None, json=json)
+
+    def apply(sample, source):
+        result = swarm_runtime.apply_leader_state_sample(sample, source)
+        accepted.append((source, result))
+        if source == "http-fallback":
+            offered.set()
+        return result
+
+    target = (1, "1", "leader")
+    policy = LeaderTransportPolicy(port=7070, poll_interval=100, request_timeout=1,
+        connect_timeout=1, sample_idle_timeout=0.75, backoff_initial=0.25, backoff_max=2)
+    supervisor = LeaderStateSupervisor(lambda: target, asyncio.Event(), apply, policy, client=Client())
+    fallback_needed = asyncio.Event()
+    fallback_needed.set()
+    pending = asyncio.create_task(supervisor._http(target, fallback_needed))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        assert supervisor._offer(target, newer_ws, "ws")
+        fallback_needed.clear()  # stream became healthy while HTTP was in flight
+        latest = dict(swarm_runtime.LEADER_STATE)
+        release.set()
+        await asyncio.wait_for(offered.wait(), 1)
+        assert accepted == [("ws", True), ("http-fallback", False)]
+        assert swarm_runtime.LEADER_STATE == latest
+        assert swarm_runtime.LEADER_STATE["stream_seq"] == 8
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
 def test_new_source_motion_replaces_sample_after_intervening_prediction(
     swarm_runtime,
     monkeypatch,
@@ -236,6 +364,106 @@ def test_new_source_motion_replaces_sample_after_intervening_prediction(
     assert swarm_runtime.apply_leader_state_sample(newer, "websocket")
     assert swarm_runtime.LEADER_STATE['stream_seq'] == 8
     assert swarm_runtime.LEADER_STATE['update_time'] == pytest.approx(42.1)
+
+
+def test_heading_projection_uses_its_own_source_clock_after_runtime_normalization(
+    swarm_runtime, monkeypatch,
+):
+    now_ms = 1_800_000_000_000
+    monkeypatch.setattr(swarm_runtime, 'time', types.SimpleNamespace(
+        time=lambda: now_ms / 1000.0, monotonic=lambda: 42.0))
+    sample = _valid_global_sample(now_ms)
+    sample.update(attitude_timestamp_ms=now_ms - 300, yaw_deg=359.0, yaw_rate_deg_s=20.0)
+    assert swarm_runtime.apply_leader_state_sample(sample, 'websocket')
+    assert swarm_runtime.LEADER_STATE['update_time'] == pytest.approx(41.9)
+    assert swarm_runtime.LEADER_STATE['attitude_update_time'] == pytest.approx(41.7)
+    assert swarm_runtime.project_leader_heading(
+        swarm_runtime.LEADER_STATE, now_s=42.1, max_prediction_s=1.0,
+    ) == pytest.approx(7.0)
+    assert swarm_runtime.LEADER_STATE['yaw'] == 359.0
+
+
+@pytest.mark.parametrize('frame', ['ned', 'body'])
+@pytest.mark.parametrize('new_leader', ['1', '3'])
+@pytest.mark.parametrize('local_height_bias_m', [0.0, 1.25])
+def test_capture_runtime_reconstruction_with_independent_origins_and_local_height_bias(
+    swarm_runtime, monkeypatch, frame, new_leader, local_height_bias_m,
+):
+    import navpy
+    from swarm_capture_service import captured_assignments, planned_heights
+
+    # Three physical aircraft, chained parent links and independent headings.
+    # Absolute MSL height and each aircraft's EKF origin are deliberately unequal.
+    reference = (47.397742, 8.545594, 488.0)
+    physical_ned = {'1': (0.0, 0.0, -20.0), '2': (6.0, -2.0, -22.0),
+                    '3': (1.0, 5.0, -23.5)}
+    positions = {hw: navpy.ned2lla(ned, *reference, latlon_unit='deg', alt_unit='m', model='wgs84')
+                 for hw, ned in physical_ned.items()}
+    draft = [{'hw_id': '1', 'follow': '0'},
+             {'hw_id': '2', 'follow': '1', 'offset_z': 2.0},
+             {'hw_id': '3', 'follow': '2', 'offset_z': 1.5}]
+    heights = planned_heights(draft)
+    headings = {'1': 37.0, '2': 248.0, '3': 115.0}
+    common_reference = positions['1']
+    observations = {}
+    for hw, lla in positions.items():
+        north, east, _ = navpy.lla2ned(*lla, *common_reference,
+                                      latlon_unit='deg', alt_unit='m', model='wgs84')
+        observations[hw] = dict(north_m=float(north), east_m=float(east),
+                                planned_up_m=heights[hw], heading_deg=headings[hw])
+    candidate = captured_assignments(draft, observations, list(positions), new_leader, frame, 'keep')
+    for hw, relative_up in planned_heights(candidate).items():
+        assert relative_up == pytest.approx(heights[hw] - heights[new_leader])
+    for member in candidate:
+        hw, parent = str(member['hw_id']), str(member['follow'])
+        if parent == '0':
+            continue
+        origin = navpy.ned2lla([11.0 * int(hw), -7.0 * int(hw), 4.0 * int(hw)], *reference,
+                               latlon_unit='deg', alt_unit='m', model='wgs84')
+        monkeypatch.setattr(swarm_runtime, 'REFERENCE_POS', dict(
+            latitude=float(origin[0]), longitude=float(origin[1]), altitude=float(origin[2])))
+        parent_lla = positions[parent]
+        measurement = swarm_runtime.build_leader_measurement_from_sample(dict(
+            position_lat=float(parent_lla[0]), position_long=float(parent_lla[1]),
+            position_alt=float(parent_lla[2]), velocity_north=0.0, velocity_east=0.0, velocity_down=0.0))
+        own = navpy.lla2ned(*positions[hw], *origin, latlon_unit='deg', alt_unit='m', model='wgs84')
+        x, y = member['offset_x'], member['offset_y']
+        if frame == 'body':
+            x, y = swarm_runtime.transform_body_to_nea(x, y, headings[parent])
+        target = (measurement['pos_n'] + x, measurement['pos_e'] + y,
+                  measurement['pos_d'] - member['offset_z'])
+        # Tangent-frame rotations differ by microradians across this local site;
+        # allow millimetres, never hide metres of origin/altitude disagreement.
+        assert target[:2] == pytest.approx(tuple(own[:2]), abs=0.001)
+        # Capture is not an estimator calibration: an inconsistent local height
+        # still produces that error, even when captured global geometry is exact.
+        reported_own_down = own[2] - local_height_bias_m
+        assert target[2] - reported_own_down == pytest.approx(local_height_bias_m, abs=0.001)
+
+
+def test_capture_keeps_planned_height_instead_of_claiming_zero_vertical_error(
+    swarm_runtime, monkeypatch,
+):
+    import navpy
+    from swarm_capture_service import captured_assignments
+
+    origin = (47.397742, 8.545594, 488.0)
+    monkeypatch.setattr(swarm_runtime, 'REFERENCE_POS', dict(
+        latitude=origin[0], longitude=origin[1], altitude=origin[2]))
+    parent = navpy.ned2lla([0.0, 0.0, -20.0], *origin,
+                           latlon_unit='deg', alt_unit='m', model='wgs84')
+    own = (6.0, 0.0, -24.0)  # Actually 4 m above parent, planned difference is 2 m.
+    draft = [{'hw_id': '1', 'follow': '0'}, {'hw_id': '2', 'follow': '1', 'offset_z': 2.0}]
+    candidate = captured_assignments(draft, {
+        '1': dict(north_m=0.0, east_m=0.0, planned_up_m=0.0),
+        '2': dict(north_m=6.0, east_m=0.0, planned_up_m=2.0),
+    }, ['1', '2'], '1', 'ned', 'keep')
+    leader = swarm_runtime.build_leader_measurement_from_sample(dict(
+        position_lat=float(parent[0]), position_long=float(parent[1]), position_alt=float(parent[2]),
+        velocity_north=0.0, velocity_east=0.0, velocity_down=0.0))
+    follower = next(member for member in candidate if member['hw_id'] == '2')
+    target_down = leader['pos_d'] - follower['offset_z']
+    assert target_down - own[2] == pytest.approx(2.0, abs=0.001)
 
 
 @pytest.mark.parametrize(

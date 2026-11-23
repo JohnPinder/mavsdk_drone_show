@@ -33,25 +33,118 @@ The current reusable validators cover:
   - fleet config validation-only collision checks, metadata-preserving config round-trip, swarm assignment round-trip, origin compute/save/bootstrap/global-origin checks, and exact cleanup restore
 - `drone_show`
   - SkyBrush import, metadata, launch readiness, global/manual/local/custom flows, and override drill
+  - The LOCAL scheduled case uses an explicit 60-second future-delay fixture;
+    override with `validate_drone_show_runtime.py --scheduled-trigger-delay N`
+    (positive integer). This is test input, not a UI default or a production
+    minimum. Native timing admission remains authoritative, and the selected
+    fixture is recorded in the JSON report.
 - `actions`
   - TAKEOFF, HOLD, completed `PRECISION_MOVE`, interrupted `PRECISION_MOVE -> HOLD`, targeted RTL override, remaining-drone LAND, and idle cleanup
 - `smart_swarm`
   - takeoff, large-separation automatic acquisition, reassignment, leader jog
     while the role session remains active, leader RTL, follower hold, and
     assignment restore
+  - Before Start, the host validator waits for the same read-only native
+    admission review as the UI, bound to the reviewed layout. A Takeoff receipt
+    can precede the next mode heartbeat. It never retries an uncertain Start
+    request; HTTP rejections preserve their structured native detail.
 - `swarm_trajectory`
   - deterministic short-profile generation, processing, launch, formation validation, and cleanup
 - `integrated_runtime`
-  - Smart Swarm cluster start, in-flight reassignment, leader-only Swarm
-    Trajectory/Precision Move override without ending the leader role session,
-    follower-side override release, HOLD supersession, and clean restore/land
+  - Smart Swarm cluster start, in-flight reassignment, rejected airborne
+    ground-only Swarm Trajectory launch without disturbing the formation,
+    leader HOLD/Precision Move with follower persistence, and clean restore/land
+  - Positive Swarm Trajectory launch belongs to the separate ground-start
+    `swarm_trajectory` gate. This drill does not enable airborne trajectory entry.
 - `quickscout`
   - deterministic `last_known_point` plan, targeted launch acceptance, airborne confirmation for targeted drones, non-target idle confirmation when applicable, HOLD, honest `replan_required` resume behavior, abort/end behavior, and clean fleet reset
 - `ulog`
   - file-backed onboard PX4 ULog list/download/erase validation on a live
     drone after a short takeoff/land sequence that guarantees a fresh log file
 
+## Communications before native flight
+
+Validate shared delivery and fault recovery without starting PX4:
+
+```bash
+python tools/validate_communications_runtime.py \
+  --output-dir /path/to/comms-evidence --aircraft 100 --clients 5
+```
+
+This bounded Linux harness uses loopback-only synthetic companions with actual
+HTTP/WS clients and the production acquisition/publisher modules. It leaves
+host networking and deployment settings untouched. Its JSON/CSV records cover
+silent/dropped streams, HTTP fallback, old-response fencing, coalescing, schema
+and epoch recovery. Source age and JSON payload bytes are not radio latency or
+wire throughput. Use the native mission and leader-outage rehearsals below to
+verify flight behavior separately.
+
+For an already served dashboard build, `tools/validate_observation_browser.cjs`
+intercepts observations and blocks writes while checking shared ownership,
+navigation and stream fallback. Set `MDS_OVERVIEW_URL`, `MDS_OVERVIEW_OUTPUT`
+and, if needed, the documented Playwright/Chromium module paths on the validation
+host. The fixture never dispatches a flight command.
+
 ## Built-In Templates
+
+Container/API startup is infrastructure readiness, not fresh flight telemetry.
+Wait for the selected native aircraft before asserting a scenario baseline.
+When switching from a formation landing to a Drone Show test, re-establish the
+show's launch geometry first. Keep the simulator continuous within a post-show
+relaunch regression; resetting between recovery and relaunch would hide the
+lifecycle behavior being tested.
+
+For the settled-position capture workflow, use an isolated SITL GCS and one
+complete saved cluster with at least two aircraft:
+
+```bash
+python3 tools/validate_swarm_capture.py \
+  --base-url http://127.0.0.1:5031 --cluster-id 3 \
+  --output-dir /path/to/capture-evidence
+```
+
+The rehearsal verifies ground NED/Body capture without saving or dispatch,
+guarded Apply, coordinated Takeoff, native role engagement before moving the
+leader, translation, Body yaw rotation, rejection of active capture, Hold,
+settled airborne Current-height capture after a deliberate vertical displacement,
+MSL-datum verification, Apply/restart, then reroot/level heights, Managed
+Return, disarm and configuration restore. Geometry matching alone is not proof
+that following has engaged, especially immediately after capturing current
+positions. The validator waits for effective native role reports first.
+It refuses REAL mode before mutations. This is an unloaded flight rehearsal,
+not a suspended-load/net validation.
+
+For screenshot/manual inspection windows, add `--ground-inspect-seconds 90`
+and/or `--hover-inspect-seconds 90`. These pause the validator only in the named
+stationary phase; they do not weaken capture, mode guards or cleanup.
+
+For the two-aircraft live-formation Apply rehearsal, including reference-frame
+changes and temporary leader loss, use an isolated SITL GCS and exactly two saved
+formation members:
+
+```bash
+python3 tools/validate_swarm_design_apply.py \
+  --base-url http://127.0.0.1:5031 --leader-id 1 --follower-id 2 \
+  --exercise-frame-changes --leader-outage-seconds 4.5 \
+  --output-dir /path/to/evidence
+```
+
+The outage option verifies local Docker identity, fleet IP and callback port
+before pausing the simulator. It refuses a remote or mismatched fleet. Use the
+default Hold/recovery policy: an outage must exceed the hard-stale threshold and
+allow a stable return within the recovery window. The tool verifies paired
+Takeoff, effective installation, formation settling, 10m spacing, Body/NED
+reacquisition, protective Hold/rejoin, unchanged saved roles, Hold-preserving
+Apply, Land and configuration restore. It does not test continuous moving leader
+handover. A running process must match its SITL system configuration too: set
+`MDS_GCS_SYSTEM_CONFIG` to the isolated configuration path instead of inheriting
+the production `/etc/mds/gcs.env`; never relax the validator's mode guard.
+
+To test expiry instead of automatic rejoin, use
+`--leader-outage-seconds 14 --expect-recovery-expired` with the default 2.5s
+hard-stale/10s recovery window. The follower must remain held after data returns;
+the rehearsal then uses explicit Stop/Start and verifies following again. Adapt
+the outage to the configured timing; this option does not change runtime policy.
 
 List the built-in templates:
 

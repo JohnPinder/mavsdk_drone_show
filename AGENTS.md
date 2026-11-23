@@ -25,21 +25,95 @@ Do not assume the environment. Detect it first.
 - Prefer the existing repo workflows and docs over inventing new ones mid-task.
 - Treat git as the source of truth. Do not normalize `docker commit` as a release workflow.
 - Keep a single source of truth for configuration and operator behavior.
+- Overview owns explicit general-command targets, never a subscription to
+  visible/online aircraft. Filters, inspection, reconnects and disappearing
+  groups must not retarget a reviewed action. Mission workspaces own mission
+  launch/recovery; close capability gaps before retiring an older entry point.
+- Smart Swarm command recipients are not its formation membership. Selected
+  Start infers read-only upstream references and verifies native source evidence
+  without restarting those aircraft or rewriting saved roles. Preserve explicit
+  shared To across Takeoff, Start and Managed Return; only Hold all has explicit
+  whole-cluster scope. Remember exact choices in their operator/runtime/cluster
+  context, and carry accepted Takeoff subsets forward, never cancelled edits.
+  Partial leader return must account for omitted tracked pending/active followers.
+  Preserve normal full-cluster wire compatibility.
+- Treat unknown telemetry as unknown, not fabricated GPS/health or evidence of
+  disarm/landing. Inspect aircraft by identity against the current shared model.
+  Settle routine presentation attention, not raw sample ages or flight admission.
+  Keep companion presence, FC telemetry and browser/config fetch failures distinct;
+  join accepted heartbeat metadata without refreshing FC clocks or nesting locks.
+- Reuse the shared observation owner before adding a page poller or socket.
+  Connection health requires useful application data, not an open socket/Pong.
+  Latest-state queues may coalesce; command journals and log coverage may not.
+  Keep native motion/recovery and bulk traffic isolated. Fallback acquisition
+  must continue during reconnect probes, with identity/epoch/generation fences.
+- Shared-shell responsive behavior has one viewport owner. CSS should consume
+  its desktop/mobile state rather than independently deciding whether navigation
+  exists; browser validation must include the intermediate tablet widths.
+- Separate operator reference names (Geographic / Leader-relative) from stable
+  `ned` / `body` contracts. Live capture-preview markers are advisory GCS-cache
+  data, never saved geometry or proof of capture authority; only the explicit
+  native capture bundle may feed a captured draft. Relative heights require a
+  common altitude datum, not subtraction of separate above-home/local origins.
+- Capture UI height defaults must come from the native bundle's whole-cluster,
+  two-epoch recommendation. Never infer grounded/airborne from armed alone or
+  silently zero mixed/unknown aircraft heights. Preserve deliberate operator
+  choices on Refresh; camera gestures never edit capture geometry.
+- Keep formation planning/capture setup choices separate from the Revert command;
+  selecting a setup workflow must not reset draft edits or switch a flight mode.
+  Browser recovery must preserve follow relationships and
+  capture guards, including legacy draft arrays. Compare normalized plan content,
+  not serialization order, before presenting a draft conflict.
+- Distinguish Linux maintenance SSH keys, GitHub account keys and repository
+  deploy keys. Never infer read-only scope from a filename or pull-only usage;
+  verify authorization before copying or rotating credentials. Keep per-node
+  private Git credentials out of reusable images and preserve working access
+  until replacements and unattended sync are verified.
+- Connectivity profile imports are full configuration baselines: inspect
+  candidate interface, hysteresis and cooldown as well as network IDs before
+  applying. A merge preserving local profiles need not preserve node-level
+  settings. Keep credential material in the approved local secret path.
 - Preserve the stock lab/SITL path as a zero-setup, plug-and-play experience.
   Warn clearly about its trusted-network security posture, but do not make
   beginner demos depend on production credential provisioning.
+- Treat SDK distribution/import name, generated gRPC/protobuf requirements and
+  native-server digest as one manifest-bound runtime, not independent upgrades.
+  Verify actual installed imports; successful resolution or CLI help is not pair
+  validation. Preserve a complete source/environment/server rollback tuple.
+- Stage image-required SDK changes on a fixed candidate release branch until
+  the replacement image passes acceptance. Do not break the stock image's
+  mutable main-branch bootstrap by publishing unsupported runtime requirements
+  before its replacement is available.
 - Keep hardened real-world and commercial deployment controls documented and
   opt-in. Do not introduce a second security-mode switch when existing auth,
   network, and secret-path settings already express the posture.
 - Use unified logs as the first debugging surface before speculative fixes.
+- Treat live-log buffers as partial observations, not archives or aircraft
+  readiness. Preserve source/session/stream identity and coverage across paging,
+  reconnects and freezes. A ready staged ULog is not a completed client download;
+  uncertain create receipts recover by lookup, never automatic replay.
+- Configured heartbeat rows can contain placeholder slots without any heartbeat.
+  Slot comparison/adoption requires fresh heartbeat-specific evidence, not just
+  telemetry presence; never suppress a numeric slot globally to hide missing data.
 - Keep code changes minimal, explainable, and test-backed.
+- An embedded HTTP server shares its process with the companion scheduler and
+  native gRPC threads. Preserve explicit standard asyncio loop selection; an
+  automatic uvloop policy can redirect later controller spawns through libuv
+  fork and deadlock before exec. Verify real FD/session-preserving subprocess
+  startup, not just mocked process creation or an accepted recovery receipt.
 - Keep modules cohesive and reviewable. Avoid growing central files with
   scenario-specific branches; extract a shared component only when it creates a
   clear ownership boundary or removes proven duplication.
 - If behavior changes, update the relevant docs and any validation tooling in the same phase.
 - If repeated findings show the agent docs are incomplete, propose or apply a focused update when the user approves.
 - If the current branch/worktree is dirty, do not overwrite unrelated user changes.
+- Before publishing customer-derived work, inspect both final files and outgoing
+  history for private deployment details. Preserve customer identities, fleet
+  configuration, mission assets and local changes when integrating upstream.
 - Do not perform destructive cleanup or reset actions unless explicitly required and safe.
+- Before removing old build/test workspaces, resolve shared dependency symlinks
+  and running-process working directories. A temporary-looking folder can still
+  provide production dependencies. Keep builds/tests on the user-designated host.
 
 ## Read First
 
@@ -49,11 +123,16 @@ Before substantial work, inspect the current repo state and then read only the d
 2. `docs/README.md`
 3. `CHANGELOG.md`
 4. Task-specific docs:
+   - companion bootstrap/enrollment: `docs/guides/mds-init-setup.md`,
+     `docs/guides/fleet-sync-and-secrets.md`, `docs/guides/custom-repo-workflow.md`
+   - flight SDK/dependency maintenance: `docs/guides/mavsdk-updates.md`,
+     `config/mavsdk-runtime.json`, `docs/guides/python-compatibility.md`
    - SITL bootstrap/runtime: `docs/guides/sitl-comprehensive.md`
    - custom image/release flow: `docs/guides/advanced-sitl.md`, `docs/guides/sitl-custom-release-workflow.md`
    - full SITL agent loop: `docs/superpowers/specs/2026-03-26-ai-agent-sitl-audit-loop.md`
    - Drone Show: `docs/features/drone-show.md`
-   - Smart Swarm: `docs/features/smart-swarm.md`
+   - Smart Swarm: `docs/features/smart-swarm.md`,
+     `docs/guides/smart-swarm-field-workflow.md`
    - Simurgh Operator / agent-safe MCP foundation: `docs/guides/simurgh-operator.md`, `docs/agent-context/README.md`
    - origin/coordinates: `docs/features/origin-system.md`, `docs/control-modes-and-coordinates.md`
    - logs/debugging: `docs/guides/logging-system.md`
@@ -101,8 +180,21 @@ Never hardcode `/opt`, `/root`, hostnames, repo URLs, or branch names without ve
 5. Validate locally
    - run the narrowest checks that prove the fix
    - expand only as needed
+   - keep unit/API tests independent of neighboring Docker fleets and host
+     callback settings; mock discovery there and reserve real discovery for
+     runtime validators, without weakening production endpoint guards
 6. Validate end to end
    - rerun the real operator workflow when behavior affects runtime missions or release paths
+   - wait for the same native Start admission used by the UI, not just a
+     takeoff receipt or an HTTP-ready process. A prior Land can leave aircraft
+     away from a show's launch slots; establish each scenario's geometry
+     separately without weakening gates or replaying actuation after uncertainty
+   - for fresh companions, verify effective REAL mode/GCS settings as the service
+     user after sidecar reconciliation and reboot; service activity and a
+     root-readable install report are not proof of runtime configuration access
+   - verify incoming FC telemetry on the configured transport and transmitted
+     MAVLink identity; optional native hardware drivers need platform eligibility
+     checks, and a successful result envelope never overrides a crashed process
 7. Update docs
    - update only the relevant docs, guides, or changelog entries
 8. Decide release impact
@@ -151,8 +243,23 @@ Rebuild and redistribute the SITL image when one of these is true:
 
 Do not rebuild the public image for docs-only clarifications unless exact image-to-commit provenance is a deliberate release goal.
 
+A source prerelease with unit/UI evidence is not a pinned SITL image or hardware
+clearance. State the accepted mission scope and unfinished capabilities explicitly;
+do not label a partial workspace checkpoint as a validated flight release.
+
 ## Logging and Evidence
 
+- Give long remote validations their own saved logs/results and bounded process
+  lifetime. If SSH disconnects, reconcile the remote process and final artifact;
+  neither transport failure nor a still-running process proves a test outcome.
+- Give each running validation an immutable runner file. Editing an executing
+  shell script can corrupt its later reads even when the replacement passes a
+  syntax check. Save failure responses and native logs before an automatic
+  fleet reset; resolve the effective `MDS_LOG_DIR`, which may be outside the
+  checkout's `logs/` directory.
+- Keep reboot-critical evidence on persistent storage, not `/tmp`. On shared
+  hosts, bound simulator memory/swap/CPU/PIDs before startup and prove a small
+  fleet first; a supervisor timeout does not bound Docker descendants' resources.
 - Prefer unified logs over ad hoc terminal output.
 - Distinguish signal from polling noise.
 - Preserve operator clarity: high-signal `INFO`, actionable `WARNING`, true failures at `ERROR`, detailed loops at `DEBUG`.

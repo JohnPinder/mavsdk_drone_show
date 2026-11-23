@@ -9,10 +9,22 @@
 
 ## Overview
 
-Launch readiness may be action-specific (`mission_type`). For Takeoff, the
+Coordinated standalone Takeoff uses the existing preparation/command lifecycle.
+Readiness and preparation responses explicitly advertise
+`coordinated_takeoff_supported`; absent support is false. Each action owns its
+bounded armed wait and authenticated stage callbacks. Conditional group-failure
+Hold checks the expected active command and fresh native takeoff state under the
+node command lock, without overriding pilot control. See
+[Coordinated Takeoff](../guides/coordinated-takeoff.md).
+
+Launch readiness may be action-specific (`mission_type`). For Takeoff and
+ground-start Swarm Trajectory (Mission 4), the
 prepared observation includes `admission.predicate=takeoff_ground_disarmed`,
 its exact native checks and matching mission type. A ready health result alone
-does not authorize Takeoff. Recovery invalidates unused preparations and fences
+does not authorize these ground starts. Both prepare and commit require the
+matching mission's native Disarmed + On-ground decision; the trajectory executor
+rechecks it before any flight-control command. Pre-ownership rejection does not
+trigger Hold, disarm or landing cleanup. Recovery invalidates unused preparations and fences
 commit-time installation; replaying the same recovery does not create a new
 flight intent. State telemetry exposes PX4 `landed_state`, its timestamp and
 age; home-relative altitude is not a substitute for landed state.
@@ -20,6 +32,13 @@ age; home-relative altitude is not a substitute for landed state.
 The Drone API Server is a high-performance FastAPI-based server that runs on each drone, providing both HTTP REST endpoints and WebSocket streaming for real-time telemetry. It handles communication with the Ground Control Station (GCS) and serves drone state information, commands, and configuration data.
 
 ## API Evolution Note
+
+The native `REBOOT_FC` action checks bounded live connection/disarm evidence
+immediately before reboot, including direct CLI invocation. If PX4 landed-state
+telemetry is available, it must freshly report ON_GROUND. Missing, stale or
+unsafe evidence produces a typed precondition failure without sending reboot;
+the legacy force flag cannot bypass it. This guard does not add GPS/health gates
+or perform an automatic disarm.
 
 As of the 2026-04-04 drone-contract cleanup, the supported HTTP contract is the canonical `/api/v1/...` surface. The old verb-style drone routes were retired instead of being kept as misleading compatibility aliases.
 
@@ -30,7 +49,7 @@ current node contract.
 ### Key Features
 
 - ✅ **HTTP REST API** - 10 endpoints for standard operations
-- ✅ **WebSocket Streaming** - Real-time telemetry push (95% less overhead)
+- ✅ **WebSocket Streaming** - Shared real-time observation delivery
 - ✅ **Auto-Generated Docs** - Interactive API documentation at `/docs`
 - ✅ **Type Validation** - Pydantic models ensure data integrity
 - ✅ **Async/Await** - Non-blocking I/O for better performance
@@ -95,6 +114,10 @@ http://drone-ip:7070/openapi.json
 **Response:**
 ```json
 {
+  "hw_id": 1,
+  "telemetry_available": true,
+  "telemetry_error": null,
+  "telemetry_last_update_age_ms": 100,
   "pos_id": 1,
   "detected_pos_id": 1,
   "state": 0,
@@ -130,13 +153,13 @@ http://drone-ip:7070/openapi.json
   "velocity_down": 0.0,
   "yaw": 180.5,
   "battery_voltage": 12.6,
-  "follow_mode": "LEADER",
-  "update_time": "2025-11-22 10:30:45",
+  "follow_mode": 0,
+  "update_time": 1732270245,
   "timestamp": 1732270245000,
-  "flight_mode": 4,
-  "base_mode": 81,
+  "flight_mode": 50593792,
+  "base_mode": 209,
   "system_status": 4,
-  "is_armed": false,
+  "is_armed": true,
   "is_ready_to_arm": true,
   "home_position_set": true,
   "readiness_status": "ready",
@@ -178,6 +201,12 @@ Readiness fields:
   existing fresh airborne evidence, not a reservation or proof of engagement.
   HTTP and WebSocket state snapshots expose the same field. Missing fields
   from older nodes are unknown to a Start review, not implicitly ready.
+- `smart_swarm_reference_admission` uses the same native airborne, freshness and
+  recovery rules for an uncommanded upstream data source. Unlike a new Start,
+  an already-active leader role is permitted. New decisions advertise
+  `scoped_start_supported=true`; older nodes default unsupported for selected
+  Start requiring references. `smart_swarm_active` and `follow_mode` expose the
+  current live role for source-chain verification, not a second formation plan.
 - `readiness_status` and `readiness_summary` are the operator-facing verdict.
 - `preflight_blockers`, `preflight_warnings`, and `status_messages` surface live PX4 preflight feedback and recent `STATUSTEXT` messages.
 - `gps_raw_valid` is raw GPS evidence from `GPS_RAW_INT`; it does not prove the drone has a usable mappable position.
@@ -327,10 +356,24 @@ Write one PX4 parameter and optionally verify readback.
 #### `POST /api/v1/px4-params/patches/apply`
 Apply a multi-parameter patch to the local PX4 vehicle.
 
+Reviewed GCS operations additionally supply `operation_id`, `expected_hw_id` and
+an `expected_current_value` for each entry. The native service checks hardware,
+component, actual parameter type and expected values under its operation lock.
+The configured disarmed requirement is checked from live native state before
+writing; missing/cached default state is not confirmed disarm.
+
+Native receipts persist before mutation. Repeating the same operation identity
+returns its recorded result; a conflicting payload is rejected. Interrupted or
+uncertain writes are lookup-only, not automatically replayed. Per-entry results
+separate write acknowledgment, actual readback, mismatch and unavailable evidence;
+`applied` and `verified` are not interchangeable. A patch can be partial.
+
 Notes:
-- the default safety policy blocks writes while armed
+- the default safety policy requires confirmed disarm for writes; browsing and
+  reads do not add GPS or navigation-readiness gates
 - docs links are generated from the configured PX4 docs version and the parameter anchor, not from live web scraping
-- metadata beyond live name/type/value is best-effort in v1 and may come from component information when available
+- metadata beyond live name/type/value is best-effort; source and authoritative
+  fields are explicit, and documentation fallback does not authorize limits
 - these routes exist as the vehicle-local MAVSDK facade; dashboard and operator flows should still go through the GCS `px4-params` routes so snapshots, diffs, imports, and batch jobs stay tracked in one place
 
 ---
@@ -459,6 +502,29 @@ returns `404` for a mismatched capability so job existence is not disclosed.
 The dashboard receives neither this capability nor the drone-local job id; it
 receives a signed opaque GCS handle bound to the authenticated actor and drone.
 
+`POST /api/v1/ulog/files/{log_id}/download` accepts an optional `request_id`
+(1–128 ASCII letters/digits plus `_.:-`, beginning with a letter/digit) alongside
+the existing optional `pos_id`. GCS supplies a stable request ID and capability
+before native staging. Repeating that identity and immutable file/runtime scope
+returns the existing job without re-listing or scheduling another transfer;
+conflicting reuse returns `409`. A small durable metadata claim survives native
+restart, but staged jobs do not: a claimed identity without runtime job state is
+unavailable/unknown, never permission to recreate it. Direct legacy calls that
+omit `request_id` retain one new job per create call.
+
+Admission rejection for an identified create is durably fenced before the node
+returns request-bound rejection evidence, authenticated with the existing
+transient job capability. An already claimed/accepted identity cannot acquire
+that rejection proof. The GCS marks a request terminally rejected only after
+verifying this evidence; an unmarked `409` or lost response remains unknown.
+
+Under the configured download/erase disarm policy, native execution checks
+confirmed fresh disarm immediately before staging/copy, the MAVSDK download, or
+erase. Filesystem fallback and summary-internal staging use the same guard.
+Missing/stale evidence is not disarm; these checks add no GPS gate and do not
+disarm aircraft. Inventory and existing-job recovery remain reads, not new
+staging authority.
+
 Summary parsing runs in an isolated, killable child process with configured
 input, memory, concurrency, and wall-clock limits. Raw transfers enforce
 per-file and aggregate limits, disk reserve, total and idle deadlines, job
@@ -538,11 +604,23 @@ The live motion routes are `GET /api/v1/swarm/state` and `WS /ws/swarm-state`.
 They carry independent `global_position_timestamp_ms` and
 `attitude_timestamp_ms` (companion receipt epoch milliseconds). Only a valid
 ATTITUDE message refreshes heading age; heartbeat/position traffic does not.
-`yaw_rate_deg_s` is nullable when unavailable, allowing the follower to derive
-rate from successive heading-source timestamps. Both transports preserve the
+`yaw_rate_deg_s` is Euler heading rate computed from ATTITUDE roll, pitch and
+body-axis rates, not simply body-z angular velocity. It is nullable when
+unavailable, allowing the follower to derive rate from successive heading-source
+timestamps. Heading prediction uses that independent attitude clock and the
+existing bounded prediction horizon. Both transports preserve the
 same fields. Smart Swarm requires fresh finite position and heading; mixed
 versions missing the attitude timestamp must be synchronized before testing.
 See [Smart Swarm motion policy](../features/smart-swarm.md#motion-profile-and-heading-freshness).
+
+The native state also carries `capture_activity` schema version 1: current MDS
+state/mission, PX4 mode, whether a Smart Swarm controller is active, timestamped
+armed/landed evidence and a node-derived `valid_for_ms` lifetime. The GCS subtracts
+round-trip and collection time rather than comparing host wall clocks. Activity
+freshness follows the native MAVLink policy, separately from the faster position
+and heading sample ages. `follow_mode` may describe a saved assignment and is
+not proof that following is active. Consumers must not infer inactivity from
+missing fields on an older node.
 
 **Endpoint:** `GET /api/v1/swarm/config`
 
@@ -604,12 +682,17 @@ See [Smart Swarm motion policy](../features/smart-swarm.md#motion-profile-and-he
 
 **Description:** Real-time drone state streaming (recommended for GCS)
 
-**Advantages over HTTP polling:**
-- ✅ **95% less network overhead** (no HTTP headers)
-- ✅ **Real-time push** (no polling delay)
-- ✅ **One-way monitoring stream** (commands stay on `POST /api/v1/drone/commands`)
-- ✅ **More efficient** for GCS monitoring multiple drones
-- ✅ **Lower latency** (~5ms vs 20ms with HTTP)
+The GCS prefers this stream only after a valid identity-matching state sample.
+HTTP acquisition continues during connection attempts and resumes when useful
+state is absent; an open socket alone is not live telemetry. Both paths preserve
+native sample timestamps. HTTP remains a supported resource for other clients.
+
+The node produces and encodes one state generation for all subscribers at the
+configured cadence, with one pending latest frame per client, a subscriber cap
+and a bounded send deadline. Intermediate observations can coalesce; this is not
+an event archive or command channel. It does not establish simultaneous native
+sensor sampling. Bandwidth/latency savings depend on payload, link and consumers,
+not a universal percentage or millisecond guarantee.
 
 ### Connection URL
 
@@ -621,21 +704,27 @@ ws://drone-ip:7070/ws/drone-state
 
 **Default:** 1 Hz (1 message per second)
 
-**Configurable rates:**
-- High frequency: 10 Hz (0.1s interval) - For precise monitoring
-- Medium frequency: 1 Hz (1s interval) - Recommended default
-- Low frequency: 0.5 Hz (2s interval) - For bandwidth-constrained networks
+The general state stream remains 1 Hz. Smart Swarm motion uses its separate
+configured `/ws/swarm-state` cadence and direct follower-to-leader path, not this
+supervisory stream. Changing a browser rate does not change flight-control rates.
 
 ### Current Contract
 
 - When state is available, each WebSocket message uses the same canonical
   payload shape as `GET /api/v1/drone/state`.
+- The typed contract retains `hw_id` and native `telemetry_available`, error and
+  sample-age fields. Unknown availability remains `null`; no FC sample time
+  produces `timestamp: 0`, never a manufactured publication timestamp.
 - When state is temporarily unavailable, the server sends the sentinel payload
   `{"error": "Drone state not available", "timestamp": ...}`.
 - This endpoint is currently a one-way monitoring stream. Command submission
   remains the HTTP route `POST /api/v1/drone/commands`.
 
-To change frequency, modify `asyncio.sleep()` value in endpoint code.
+Connection admission, snapshot size and send deadlines are bounded. A slow or
+disconnected viewer cannot create an unlimited historical telemetry backlog.
+The node's encoded state-frame budget is 1 MiB; oversize or nonfinite source
+state produces an unavailable sentinel, not a truncated or apparently healthy
+snapshot.
 
 ### Data Format
 

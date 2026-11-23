@@ -51,6 +51,8 @@ def _submission_deps(*, dispatch=None, estimate=None, preparation=None, fleet_co
         shapes_dir="/tmp/shapes",
         get_swarm_trajectory_folders=lambda: {"processed": "/tmp/processed"},
         swarm_trajectory_service=SimpleNamespace(
+            get_dispatch_package_payload=lambda ids: {'revision': 'test-revision', 'files': {str(i): 'a' * 64 for i in ids}},
+            get_validation_payload=lambda: {"success": True, "ready": True, "blockers": []},
             get_processing_status_payload=lambda: {
                 "status": {"processed_drones": [], "follow_map": {}}
             },
@@ -63,6 +65,69 @@ def _submission_deps(*, dispatch=None, estimate=None, preparation=None, fleet_co
         log_system_error=lambda *_args, **_kwargs: None,
     )
     return deps, tracker, coordinator
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_ids", [None, ["1"]])
+@pytest.mark.parametrize("validation", [
+    None,
+    {},
+    {"success": True, "ready": True, "blockers": None},
+    {"success": True, "ready": True, "blockers": ["malformed"]},
+    {"success": False, "ready": True, "blockers": []},
+    {"success": True, "ready": False, "blockers": []},
+    {"success": True, "ready": False, "blockers": [
+        {"code": "swarm_trajectory_reprocess_required", "message": "Processing session is stale"}
+    ]},
+    {"success": True, "ready": True, "blockers": [
+        {"code": "swarm_trajectory_missing_processed_drones", "message": "Missing aircraft output"}
+    ]},
+])
+async def test_swarm_trajectory_launch_fails_closed_on_package_validation(target_ids, validation):
+    dispatch = AsyncMock()
+    prepare = AsyncMock()
+    deps, _tracker, _coordinator = _submission_deps(dispatch=dispatch, preparation=prepare)
+    deps.swarm_trajectory_service.get_validation_payload = lambda: validation
+    with pytest.raises(HTTPException) as error:
+        await submit_tracked_command(deps, SubmitCommandRequest(
+            mission_type=Mission.SWARM_TRAJECTORY.value, target_drone_ids=target_ids,
+            **({"target_scope": "all"} if target_ids is None else {})))
+    assert error.value.status_code == 409
+    assert "No command was dispatched" in error.value.detail
+    dispatch.assert_not_awaited()
+    prepare.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_swarm_trajectory_validation_exception_prevents_launch():
+    deps, _tracker, _coordinator = _submission_deps()
+    def unavailable():
+        raise OSError("Cannot read package")
+    deps.swarm_trajectory_service.get_validation_payload = unavailable
+    with pytest.raises(HTTPException, match="readiness could not be verified"):
+        await submit_tracked_command(deps, SubmitCommandRequest(mission_type=4, target_scope="all"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_ids", [None, ["1"]])
+async def test_swarm_trajectory_checks_scope_and_validation_for_every_launch(target_ids):
+    from unittest.mock import Mock
+    deps, tracker, coordinator = _submission_deps()
+    validate = Mock(return_value={"success": True, "ready": True, "blockers": [],
+                                  "warnings": [{"message": "Plots unavailable"}]})
+    scope = Mock(return_value=[])
+    deps.swarm_trajectory_service.get_validation_payload = validate
+    deps.swarm_trajectory_service.validate_target_scope_for_swarm_trajectory = scope
+    await coordinator.start()
+    try:
+        receipt = await submit_tracked_command(deps, SubmitCommandRequest(
+            mission_type=4, target_drone_ids=target_ids,
+            **({"target_scope": "all"} if target_ids is None else {})))
+        assert (await tracker.get_status(receipt.command_id))["target_drones"] == ["1"]
+        validate.assert_called_once_with()
+        assert scope.call_args.kwargs["target_drone_ids"] == [1]
+    finally:
+        await coordinator.stop()
 
 
 @pytest.mark.asyncio
@@ -113,7 +178,7 @@ async def test_smart_swarm_accepts_complete_cluster_target_scope():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('excluded,unavailable,accepted', [([], False, False), (['2'], False, False), (['2'], True, True)])
+@pytest.mark.parametrize('excluded,unavailable,accepted', [([], False, False), (['2'], False, True), (['2'], True, True)])
 async def test_explicit_session_cannot_bypass_complete_cluster_or_partial_review(excluded, unavailable, accepted):
     from src.smart_swarm_contract import SmartSwarmSession, normalize_topology, topology_revision
     layout = normalize_topology([{'hw_id': 1, 'follow': 0}, {'hw_id': 2, 'follow': 1}])
@@ -433,3 +498,46 @@ async def test_strict_sync_zero_trigger_is_finalized_only_after_prepare_barrier(
     }
     assert status["params"]["trigger_time"] == committed_trigger
     await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_generic_swarm_start_rechecks_revision_inside_shared_apply_lock():
+    from swarm_configuration_guard import configuration_lock
+
+    saved = [{'hw_id': 1, 'follow': 0}, {'hw_id': 2, 'follow': 1, 'offset_x': 5}]
+    deps, tracker, coordinator = _submission_deps(swarm=saved, fleet_config=[
+        {'hw_id': '1', 'pos_id': 1, 'ip': '127.0.0.1'},
+        {'hw_id': '2', 'pos_id': 2, 'ip': '127.0.0.2'}])
+    reviewed = asyncio.Event()
+    rpc = deps.get_fleet_rpc_service()
+    original_review = rpc.review_swarm_start
+
+    async def review(drones):
+        result = await original_review(drones)
+        reviewed.set()
+        return result
+
+    rpc.review_swarm_start = review
+    await coordinator.start()
+    task = None
+    try:
+        async with configuration_lock(deps):
+            task = asyncio.create_task(submit_tracked_command(deps, SubmitCommandRequest(
+                mission_type=2, target_drone_ids=['1', '2'], idempotency_key='capture-apply-race')))
+            await asyncio.wait_for(reviewed.wait(), timeout=1)
+            await asyncio.sleep(0)
+            assert await tracker.get_active_commands() == []
+            # Equivalent to a canonical Apply completing while this Start was
+            # still reviewing: it must not register its old implicit snapshot.
+            saved[1]['offset_x'] = 9
+        with pytest.raises(HTTPException) as error:
+            await task
+        assert error.value.status_code == 409
+        assert 'changed during Start review' in error.value.detail
+        assert await tracker.get_active_commands() == []
+        assert rpc.dispatch_calls == []
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await coordinator.stop()

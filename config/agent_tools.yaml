@@ -638,7 +638,7 @@ tools:
       target_drone_ids:
         type: array
         minItems: 1
-        maxItems: 64
+        maxItems: 100
         uniqueItems: true
         items:
           type: string
@@ -1401,6 +1401,10 @@ tools:
       takeoff_altitude:
         type: number
         exclusiveMinimum: 0
+      takeoff_mode:
+        type: string
+        enum: [coordinated, independent]
+        description: Standalone TAKE_OFF only. Groups default to coordinated arming; independent must be explicitly requested and confirmed.
       precision_move:
         type: object
         additionalProperties: false
@@ -1748,6 +1752,11 @@ tools:
   - docs/features/swarm-trajectory.md
   safety_notes:
   - Swarm configuration is planned data, not live spacing.
+  - Capture defaults are native whole-cluster advice (grounded level, settled airborne current, mixed none); read-only telemetry cannot choose or apply them.
+  - Operator labels Geographic and Leader-relative map to ned and body; do not rewrite API values.
+  - Capture live markers are advisory cached telemetry; Current heights require the explicit native airborne capture capability, not subtraction of above-home heights.
+  - Capturing current spacing is an explicit operator workflow; reading this
+    resource does not measure positions, apply a draft or start following.
 - id: mds.shows.skybrush.read
   title: Read SkyBrush show summary
   description: Read processed SkyBrush show summary from the GCS.
@@ -3598,7 +3607,7 @@ tools:
         description: PX4 parameter snapshot id.
 - id: mds.px4_params.patch_job.read
   title: Read PX4 parameter patch job
-  description: Read one PX4 parameter patch job status by job id.
+  description: Read one durable PX4 parameter operation receipt by job id, including per-aircraft write and readback evidence.
   exposure: allow
   risk_class: sensitive_observe
   boundary: gcs
@@ -3626,6 +3635,8 @@ tools:
   safety_notes:
   - This reads patch-job status only; creating, confirming, or applying PX4 param
     patches remains outside read-only tools.
+  - Accepted or completed does not mean verified. Inspect per-aircraft and per-entry
+    outcomes; unknown writes must not be automatically replayed.
   input_schema:
     type: object
     additionalProperties: false
@@ -3814,9 +3825,66 @@ tools:
         maxLength: 160
         pattern: ^[A-Za-z0-9_.:-]+$
         description: QuickScout mission id.
+- id: mds.swarm_trajectories.workspace.read
+  title: Read trajectory mission workspace
+  description: Read mission-owned layout, route preview, package readiness and reviewed launch identity.
+  exposure: allow
+  risk_class: sensitive_observe
+  boundary: gcs
+  read_only: true
+  route:
+    method: GET
+    path: /api/v1/swarm-trajectories/workspace
+  required_role: viewer
+  runtime_modes: [read_only, sitl, real]
+  side_effects: []
+  sensitivity: [mission_state, fleet_identity]
+  tags: [swarm, trajectory, planning]
+  docs: [docs/features/swarm-trajectory.md]
+  safety_notes:
+  - Package readiness is not aircraft armability or proof of terrain and collision clearance.
+
+- id: mds.swarm_trajectories.formation.read
+  title: Read mission-owned trajectory formation
+  description: Read the planned trajectory formation snapshot and revision, separate from live Smart Swarm.
+  exposure: allow
+  risk_class: sensitive_observe
+  boundary: gcs
+  read_only: true
+  route:
+    method: GET
+    path: /api/v1/swarm-trajectories/formation
+  required_role: viewer
+  runtime_modes: [read_only, sitl, real]
+  side_effects: []
+  sensitivity: [mission_state, fleet_identity]
+  tags: [swarm, trajectory, formation]
+  docs: [docs/features/swarm-trajectory.md]
+  safety_notes:
+  - Planned formation is not evidence of aircraft position or flight readiness.
+
+- id: mds.swarm_trajectories.operation.read
+  title: Read trajectory operation status
+  description: Read tracked trajectory commands, recovery actions, fleet freshness and reported execution state.
+  exposure: allow
+  risk_class: sensitive_observe
+  boundary: gcs
+  read_only: true
+  route:
+    method: GET
+    path: /api/v1/swarm-trajectories/operation
+  required_role: viewer
+  runtime_modes: [read_only, sitl, real]
+  side_effects: []
+  sensitivity: [mission_state, fleet_identity]
+  tags: [swarm, trajectory, operation]
+  docs: [docs/features/swarm-trajectory.md]
+  safety_notes:
+  - Commanded trajectory progress is not measured tracking accuracy; stale reports are not live truth.
+
 - id: mds.swarm_trajectories.leaders.read
   title: Read swarm trajectory leaders
-  description: Read top-level swarm trajectory leaders from configured swarm state.
+  description: Read top-level trajectory leaders from the mission-owned formation snapshot or initial live-layout draft.
   exposure: allow
   risk_class: sensitive_observe
   boundary: gcs

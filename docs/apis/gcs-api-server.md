@@ -5,6 +5,10 @@
 **Base URL:** `http://localhost:5030`
 **Documentation:** `/docs` (Swagger UI) | `/redoc` (ReDoc)
 
+Standalone multi-aircraft Takeoff supports the command-bound all-armed barrier,
+native read-only readiness and pre-release cancellation. See the
+[Coordinated Takeoff API and operator guide](../guides/coordinated-takeoff.md).
+
 ---
 
 ## Table of Contents
@@ -32,6 +36,14 @@ The GCS (Ground Control Station) API Server provides comprehensive control and m
 - **Canonical `/api/v1/...` business routes** plus a small set of intentionally stable operational roots
 
 ## API Evolution Note
+
+Fleet telemetry REST responses and `/ws/telemetry` join the latest accepted
+heartbeat metadata when read, independently of FC telemetry-poll backoff. They
+copy cached rows under the telemetry lock, then read heartbeat snapshots under
+their own lock; no lock nesting or mutation of the stored FC sample occurs.
+Only heartbeat receipt/network metadata is refreshed. Native timestamps,
+telemetry availability, readiness, flight state, roster and command authority
+are not refreshed by an HTTP/WebSocket response or a companion heartbeat.
 
 Execution callbacks and command status retain optional bounded `action_result`,
 `control_release` and `teardown_forced` evidence. Action results preserve the
@@ -158,14 +170,89 @@ Example reconcile request:
 
 ### Sequential Smart Swarm Return
 
+#### Capture current formation
+
+`POST /api/v1/config/swarm/capture-preview` reads a complete settled cluster into
+an unsaved candidate. It sends no flight commands and writes neither the GCS
+configuration nor Git. It uses native estimator positions, independently dated
+headings and activity evidence; a successful HTTP connection alone is not valid
+capture evidence. Both grounded and settled airborne aircraft are supported;
+active following, pending Start and native recovery/transition modes are not.
+
+The request contains the current `revision`, complete draft `assignments`,
+`cluster_id`, optional `leader_hw_id`, `frame` (`ned` or `body`) and `height_mode`.
+Height mode is `keep` (retain planned relative heights), `level` (zero relative
+heights), or explicit `current` (estimated relative heights from a common PX4 MSL
+datum). Current requires both native sampling epochs to confirm every member
+armed/airborne and height change within the existing capture-drift confidence bound;
+otherwise it rejects with `capture_current_heights_unavailable`. Keep/level do not
+acquire this additional requirement and never import measured height differences.
+Offsets use Up-positive
+vertical values in both NED and Body. Leader replacement reverses the path to the
+new root; off-path relay branches and unrelated clusters remain intact.
+
+The response contains `capture_id`, `captured_at_ms`, base `revision`, resulting
+`cluster_id`, complete candidate `assignments`, sampled `headings`, frozen
+`observations`, temporary projection `reference`, `current_heights_available`,
+`current_heights_reason`, and explicit `saved:false`,
+`commands_sent:false`. The temporary reference is not a PX4 home or saved show
+origin. The browser may rederive candidate roles/frame/heights from these frozen
+observations; only explicit Refresh takes new measurements.
+
+`flight_state` is `grounded`, `airborne`, or `mixed`, based on the whole cluster
+across both native epochs. Grounded includes an armed aircraft confirmed ON_GROUND;
+arming alone is not flight. Airborne requires armed plus IN_AIR throughout.
+`recommended_height_mode` is `level` for grounded, `current` for airborne with
+Current capability, otherwise `null`. It is UI advice, not an implicit API mutation;
+request default `keep` is unchanged for compatibility. The UI initializes from the
+recommendation, preserves explicit choices, and requires a choice when none is
+recommended. Clients must not use cached live markers to select these defaults.
+
+Each observation contains `planned_up_m` and `current_up_m`. The latter is its
+estimated MSL height minus the frozen reference height, not a local-down or
+above-home value. `current_heights_available:false` is not a failure of keep/level;
+the reason explains why only Current is unavailable. UI labels Geographic and
+Leader-relative map to unchanged `ned` and `body` values.
+
+The modal's hollow live markers use the existing `GET /api/v1/fleet/telemetry`
+cache, never a second aircraft polling service or a capture result used for saving.
+Only explicit Capture/Refresh performs native validation. A viewer/MCP read of
+configuration or telemetry does not apply a capture or dispatch a mission.
+
+Typed HTTP 409 failures identify a `code`, actionable `message` and, where
+applicable, `hw_id`. Do not partially apply a failed cluster capture or invent
+heading/position defaults. Old nodes without native capture evidence need updating.
+
+Capture-derived drafts use existing `PUT /api/v1/config/swarm?commit=false` with
+the normal base `revision` and `require_inactive_hw_ids`. This optional precondition
+checks affected old/new dependencies and fresh native activity, and serializes
+the final save against GCS Smart Swarm Start registration. Unknown or active
+aircraft reject without writing; this path does not offer Apply anyway. Normal
+intentional active formation edits retain their existing semantics. This local
+guard is not a distributed flight reservation.
+
+After uncertain Apply responses, read the canonical resource/revision rather than
+resampling or blindly submitting another operation. Repository publication uses
+the existing revision-bound publish endpoint. Preview is an operator API; adding
+it here does not implicitly expose a new Simurgh/MCP tool or grant flight authority.
+
+See the [illustrated operator workflow](../guides/smart-swarm-field-workflow.md).
+
+#### Runtime and return APIs
+
 `GET /api/v1/swarm/runtime/preview` supplies the saved topology revision,
 clusters, runtime mode and advisory per-member telemetry to both operation
 surfaces. `POST /api/v1/swarm/runtime/start` takes `cluster_id`, `revision`,
-`excluded_hw_ids` and `idempotency_key`; the revision binds the reviewed layout.
-Generic mission-2 submissions must match one complete saved cluster. Explicit
-session payloads are checked too: only a dependency-closed, currently unavailable
-exclusion set permits partial start. Incomplete scope is rejected with HTTP 409,
-not silently expanded or dispatched.
+optional `target_hw_ids` and `idempotency_key`; the revision binds the reviewed
+layout. Omitted targets default to the full cluster. Explicit targets must be
+unique known members of that cluster; the server infers `reference_hw_ids` from
+their complete saved upstream chains. References receive no command. Remaining
+members are explicit omissions, independent of availability. Legacy
+`excluded_hw_ids` remains accepted for dependency-closed subsets, but cannot be
+combined with explicit targets. Generic mission-2 requests without a session
+still require one complete cluster. Explicit session payloads partition that
+cluster into disjoint targets/references/omissions; malformed scope is rejected,
+never expanded or silently reparented.
 
 `GET /api/v1/swarm/runtime/preview?cluster_id=1&check_start=true` adds
 `start_admissions`, keyed by hardware ID, from bounded parallel node-state
@@ -173,6 +260,18 @@ reads for that cluster only. Ordinary background previews perform no node
 RPC. The GCS verifies node identity and subtracts its monotonic transit time
 from each node's `valid_for_ms`; it does not compare clocks across hosts.
 Missing/old-node responses are unknown. This read never arms or reserves.
+Repeated `target_hw_ids=2&target_hw_ids=3` parameters review a selected subset.
+The response adds `reference_hw_ids` and separate `reference_admissions` for its
+read-only sources. Source action ownership alone does not disqualify an active
+leader, but native freshness, airborne state, takeover modes and matching live
+follow links still apply. Targets must advertise `scoped_start_supported=true`
+when references are needed. The startup barrier revalidates sources before
+engaging; no reference probes are needed after engagement. Empty references
+are omitted from session wire serialization for older full-cluster nodes.
+Background previews also provide `observed_at_ms` and `runtime_nodes` keyed by
+hardware ID (latest command identity, report, `has_session`, `stale`). This is
+journal evidence, not proof of current flight state. A later retry/recovery
+cannot be masked by an older cluster session.
 All new mission-2 submissions repeat this review before any dispatch. A known
 ineligible target returns HTTP 409 with `detail.message`, `start_admissions`
 and `dispatched=false`. Idempotent replay lookup happens first, so a lost
@@ -196,6 +295,14 @@ requires fresh review plus explicit confirmation to submit again. Ambiguous
   commands not yet issued; already-issued commands continue.
 
 One queue runs at a time. Reusing a key with different order/delay returns 409.
+Targets are explicit, not implicitly expanded to the cluster. Returning a source
+while omitting its tracked pending/active Smart Swarm followers returns 409 before
+Hold; the check repeats before each RTL. Include those followers or explicitly
+stop them first. The check uses tracked session topology and matching native
+control-release evidence, not just a failed/missing execution receipt; it is not
+collision avoidance or authority over external/untracked controllers. If initial
+Hold fails, the status identifies unavailable/rejected targets and reports that
+no RTL commands were sent. An uncertain RTL submission is not labelled unsent.
 Hold and per-aircraft RTL use the canonical command lifecycle; their command IDs
 are returned in `hold_command_id` and `commands`. Queue states are `holding`,
 `dispatching`, `waiting`, `dispatched`, `cancelled`, `interrupted`, `failed`.
@@ -323,13 +430,16 @@ Parse a QGroundControl `.params` file into typed patch entries without writing t
 #### `POST /api/v1/px4-params/imports/mds`
 Parse a typed MDS JSON patch payload into patch entries without writing them.
 
-#### `POST /api/v1/px4-params/patch-jobs`
-Apply one patch set to one or more drones through the GCS.
+#### `POST /api/v1/px4-params/reviews`
+Prepare a read-only, immutable review from fresh per-aircraft values. This does
+not write parameters. The response binds aircraft/component/snapshot identity,
+exact changed values, source/profile revision and expiry to a review hash.
 
 **Request:**
 ```json
 {
   "hw_ids": ["1", "2"],
+  "excluded_hw_ids": [],
   "source": "manual",
   "verify_readback": true,
   "entries": [
@@ -343,8 +453,53 @@ Apply one patch set to one or more drones through the GCS.
 }
 ```
 
+The response includes `review_id`, `review_hash`, `runtime_binding`, `targets`,
+`blocked`, `warnings`, `created_at` and `expires_at`. Each target lists its
+`changes` with `current_value` and `desired_value`, `unchanged_count`, blockers
+and metadata/reboot hints. An unreadable/missing/type-conflicting target is not
+silently removed. To exclude aircraft, prepare a new review with the exact
+included/excluded IDs. Optional `profile_id` binds a saved profile's contents.
+
+#### `GET /api/v1/px4-params/reviews/{review_id}`
+Retrieve the same prepared review. Inspection is not permission to overwrite
+changed vehicle values; expected values are rechecked at native execution.
+
+#### `POST /api/v1/px4-params/patch-jobs`
+Accept a reviewed operation and return **202 Accepted** with a durable receipt
+before any vehicle write. Acceptance does not mean completion or verification.
+
+```json
+{
+  "review_id": "px4-review-example",
+  "review_hash": "the hash returned by preparation",
+  "idempotency_key": "client-generated-unique-operation-key"
+}
+```
+
+Targets and entries cannot be replaced in this submission. Repeating the same
+idempotency identity retrieves the same job; reusing it for a different review
+conflicts. Relevant value/source/runtime conflicts require a new review.
+
+Legacy `{hw_ids, source, verify_readback, entries}` bodies remain a compatibility
+input to this same review/job engine, not a second mutation path. New clients
+should prepare explicitly and retain their idempotency key before submitting.
+Clients must handle accepted/running receipts rather than assuming the POST
+contains a finished batch result.
+
 #### `GET /api/v1/px4-params/patch-jobs/{job_id}`
-Return the tracked result envelope for one GCS patch job.
+Return the durable receipt, including `terminal`, job status and per-aircraft
+results. Status is `queued`, `running`, `completed`, `partial`, `failed` or
+`unknown`; per-entry write/readback evidence determines actual verification.
+
+#### `GET /api/v1/px4-params/patch-jobs/by-idempotency/{idempotency_key}`
+Recover the original receipt after a lost POST response, without resubmitting a
+new parameter operation. A GCS restart fences interrupted work; it never resumes
+possibly delivered writes automatically. Reconciliation establishes current
+observations, not proof of a previous write or reboot activation.
+
+Known write/readback results survive a subsequent snapshot refresh failure.
+Timeout or missing readback is not fabricated as “no write happened.” Writes may
+be partial; restoration requires its own current-value review.
 
 Notes:
 - full parameter retrieval happens between GCS and drones, not between dashboard and drones
@@ -530,11 +685,19 @@ Canonical fleet telemetry snapshot used by the dashboard and validation tooling.
   },
   "total_drones": 10,
   "online_drones": 8,
+  "display_policy": {"stale_sec": 10, "available_sec": 60},
   "timestamp": 1700000000000
 }
 ```
 
 The older GCS HTTP telemetry aliases were retired on 2026-04-03. Use the canonical route above.
+
+`display_policy` is an additive Overview display contract. `stale_sec` is the
+heartbeat-age stale cue (`MDS_OVERVIEW_STALE_SEC`, default 10 seconds);
+`available_sec` is the heartbeat retention window from the effective canonical
+`MDS_PRESENCE_STALE_SEC` presence threshold (default 60 seconds). Both are finite
+and positive; the stale cue is capped at the retention window. These fields do
+not change telemetry freshness, native armability, readiness or command admission.
 
 `readiness_status`, `readiness_summary`, `preflight_blockers`, and `status_messages` are the operator-facing fields the dashboard now uses for "Ready to Fly" and live PX4 preflight feedback.
 
@@ -543,6 +706,19 @@ The older GCS HTTP telemetry aliases were retired on 2026-04-03. Use the canonic
 `relative_altitude_m` and the `relative_home` altitude source are nullable until the drone reports `home_position_set=true`. GCS also revalidates legacy node payloads so a pre-home `GLOBAL_POSITION_INT.relative_alt` cannot be mislabeled as home-relative altitude.
 
 `distance_to_home_m` is a nullable horizontal distance from the drone's current valid global position to PX4's authoritative home position; dashboards should show `n/a` until current position is valid and `home_position_set=true`. A companion fallback cache is not authoritative home.
+
+#### `GET /api/v1/fleet/action-readiness`
+
+Read cached, freshness-bounded readiness evidence for 1–100 `target_drone_ids`
+query entries (repeat the query parameter for each aircraft). More than 100
+entries returns HTTP 422. The response deduplicates IDs in first-requested order;
+missing, unavailable or stale telemetry cannot count as ready. The matching
+`mds.fleet.action_readiness.read` tool also accepts up to 100 unique IDs.
+
+This read-only check performs no per-aircraft RPC and does not grant command
+authority. Configuration, heartbeat and locked telemetry snapshots are acquired
+separately; they are not one fleet-wide atomic observation. Native command
+admission still rechecks readiness.
 
 ---
 
@@ -957,6 +1133,11 @@ target hardware IDs, operation kind, telemetry age/freshness, armed state, and
 battery percentage. It derives state from the command tracker and does not
 create or alter commands.
 
+The optional `mission_type=1` (SkyBrush) or `mission_type=3` (Custom CSV)
+query filters the recorded show/recovery history for its owning workspace.
+Omitting it preserves the combined projection. Other values are rejected.
+The fleet inventory is not changed by this history filter.
+
 Example shape:
 ```json
 {
@@ -984,6 +1165,10 @@ Download processed show files as ZIP.
 #### `GET /api/v1/shows/custom`
 Get metadata for the active custom replay CSV.
 
+`sha256` is the current GCS CSV fingerprint for operator review. It is not a
+drone-side package receipt or a binding that guarantees the installed file on
+every aircraft. The field is absent/null when no active file is available.
+
 **Response:**
 ```json
 {
@@ -993,6 +1178,7 @@ Get metadata for the active custom replay CSV.
   "duration_sec": 120.0,
   "max_altitude": 35.0,
   "preview_exists": true,
+  "preview_themes": {"light": true, "dark": true},
   "execution_mode": "local per-drone replay",
   "required_columns": ["t", "px", "py", "pz", "vx", "vy", "vz", "ax", "ay", "az", "yaw", "mode"]
 }
@@ -1057,9 +1243,22 @@ Get specific show plot image.
 The server now rejects path traversal attempts and only serves files inside the configured show-plots directory.
 
 #### `GET /api/v1/shows/custom/preview`
-Get custom drone show trajectory plot image.
+Get the custom drone show trajectory plot image. Optional `theme=light|dark`
+defaults to `light` for existing clients. Missing variants return 404; GET never
+generates files. Invalid themes return 422.
 
 **Response:** PNG image file
+
+#### `POST /api/v1/shows/custom/preview`
+Explicitly regenerate both theme variants from the active CSV. This image-only
+maintenance write does not import, sync or modify the CSV, issue an aircraft
+command, or change its SHA-256 identity. No request body is required. It uses
+the normal authenticated write boundary; it is not a callable Simurgh tool.
+Returns 404 if no active CSV exists, or a validation error for invalid CSV data.
+
+```json
+{"success": true, "preview_generated": true, "preview_themes": {"light": true, "dark": true}}
+```
 
 #### `GET /api/v1/shows/skybrush/metrics`
 Retrieve comprehensive trajectory analysis metrics.
@@ -1167,6 +1366,29 @@ The older verb-style GCS swarm configuration aliases were retired on 2026-04-03.
 
 #### `GET /api/v1/config/swarm`
 Get the canonical swarm configuration resource.
+
+The response includes an `ETag` derived from the existing normalized formation
+revision and `Cache-Control: no-cache`. `If-None-Match` supports weak validators,
+multiple validators and `*`; a match returns `304` without a body.
+
+#### `WS /ws/swarm-config`
+
+Read-only formation watch, authorized through the existing WebSocket auth path.
+Node clients supply the existing bearer header; no new credential mode is added.
+Dashboard-only login preserves the existing machine HTTP resource's trusted-network
+access. Enabling full API authentication requires credentials for both HTTP and
+the watch; ordinary dashboard WebSockets retain their existing login requirement.
+On connection and after a change, messages use `type: swarm_config` with the
+complete canonical resource under `data` (`version`, `revision`, `assignments`).
+The assignments array is nonempty and normalized. Heartbeat messages use
+`{"type":"heartbeat"}` at idle intervals of 15 seconds. Delivery is latest-state,
+not an event log: reconnect obtains a current snapshot. Slow clients are
+disconnected after a 5-second send timeout. Existing runtime reports, rather
+than transport receipt, determine effective installation. No handover commands
+are carried on this stream. Existing HTTP/MCP read tools remain authoritative
+and need no streaming adapter.
+
+#### Canonical formation resource
 
 **Response:**
 ```json
@@ -1276,6 +1498,12 @@ The canonical response returns the normalized assignment resource, including the
 defaulted offset fields and frame for each assignment.
 
 #### `PATCH /api/v1/config/swarm/assignments/{hw_id}`
+
+Revision-aware clients may include `revision` and
+`acknowledged_unavailable_hw_ids`, as with PUT. A stale revision returns `409`
+without saving; receipt metadata is never written into an aircraft assignment.
+Legacy payloads remain accepted during rollout. Both paths use the same atomic
+canonical persistence and watch notification boundary.
 Patch a saved swarm assignment for one hardware drone.
 
 This is the canonical replacement for the older leader-only naming. The live
@@ -1315,7 +1543,9 @@ promotes the aircraft to independent leader.
 ```
 
 #### `GET /api/v1/swarm-trajectories/leaders`
-Get list of top leaders from swarm configuration.
+Get top leaders from this mission's Formation snapshot, not editable live
+Smart Swarm roles. Before the snapshot is saved, reads expose the initial live
+layout as a draft without writing it.
 
 **Response:**
 ```json
@@ -1420,6 +1650,12 @@ message instead of pretending cancellation stopped work immediately.
 
 #### `GET /api/v1/swarm-trajectories/status`
 Get current processing status and file counts.
+
+`leader_count` and `follower_count` count processed aircraft assigned in the
+current mission formation. Optional `unassigned_processed_drones` lists retained
+output IDs without a current assignment; these are files, not extra followers.
+The read-only preview may expose their paths for explicit inspection without
+adding them to the mission or deleting them.
 
 **Response:**
 ```json
@@ -1538,6 +1774,29 @@ Use this endpoint as the frontend source of truth for Swarm Trajectory planner d
 
 Additional active Swarm Trajectory endpoints:
 
+- `GET /api/v1/swarm-trajectories/workspace`: typed aggregate package review,
+  preview, independent formation and reviewed launch identity.
+- `GET /api/v1/swarm-trajectories/operation`: command-tracker and fleet-presence
+  projection, including command-scoped aircraft trajectory reports. Commanded
+  route time is not measured tracking accuracy.
+- `GET|PUT /api/v1/swarm-trajectories/formation`: read/save the mission-owned
+  snapshot. PUT carries `assignments` and the previous `revision`; stale revisions
+  return 409. Reads never create a snapshot or change live Smart Swarm roles.
+- Package-mutating requests reject active tracked Mission 4 runs. Processing-job
+  `progress_percent` may be null; use phase/status rather than inventing a percent.
+
+Mission 4 command submission rechecks package readiness and attaches a typed
+`swarm_trajectory` identity containing `revision` and a `files` mapping from
+hardware ID to lowercase SHA-256 digest. A caller may provide its reviewed
+identity; submission rejects it if it differs from the current package. Nodes
+verify their generated file before arming. This field is invalid for other
+missions. It does not replace PX4 readiness or certify trajectory clearance.
+
+Mission 4 is ground-start only: FleetRPC and the node prepare/commit boundaries
+require current mission-specific native Disarmed + On-ground admission, not a
+generic ready-health response. Update GCS and nodes together; old nodes without
+this evidence cannot authorize a ground-start trajectory mission.
+
 - `GET /api/v1/swarm-trajectories/recommendation`
 - `POST /api/v1/swarm-trajectories/process/jobs`
 - `GET /api/v1/swarm-trajectories/process/jobs/{job_id}`
@@ -1648,6 +1907,17 @@ Important semantics:
 - `timeout_at` in the tracking resource is authoritative and already includes any future trigger delay plus the expected execution/cleanup window; clients must not guess a separate flat timeout.
 - tracker timeout budgets are mission-aware instead of one flat timeout: short actions use action-specific budgets, while Drone Show, Custom CSV, and Swarm Trajectory derive longer tracking windows from the active mission assets plus cleanup buffers.
 - if `trigger_time` schedules the command in the future, that waiting period is reflected in authoritative `timeout_at`; delayed-command clients continue monitoring that resource instead of imposing a shorter local timeout.
+- For Drone Show, Custom CSV and Hover Test, GCS dispatch deadlines, node commit
+  admission and executor scheduling share a 10-second Python/MAVSDK preparation
+  lead (`MDS_SYNCHRONIZED_SHOW_PREPARATION_SEC`, finite positive override matched
+  on GCS and nodes). This starts setup earlier, not arming: the original trigger,
+  one-second late-start abort and live native checks are unchanged. Other mission
+  and recovery scheduling keeps its existing lead.
+- For strict synchronized missions, `trigger_time=0` means as soon as safely
+  synchronized: GCS selects one future trigger after the readiness barrier.
+  An explicit timestamp is preserved only if the bounded dispatch/preparation
+  window still fits after that barrier; otherwise it is rejected, not silently
+  moved. Preparation timeouts are maximum budgets, not a fixed operator delay.
 - duplicate delivery of the same `command_id` to a drone is treated as idempotent while that command is still queued or executing; the drone returns an accepted ACK rather than re-installing the mission.
 - `mission_type=0` is the dedicated cancel/clear path for shared command control. It clears queued or active mission state without launching a normal mission subprocess.
 - there is currently no separate command-specific cancel resource. Live cancellation goes through `POST /api/v1/commands` with `mission_type=0` so the cancel action is actually dispatched to drones.
@@ -1815,6 +2085,13 @@ Use this contract for:
 Canonical git routes are exposed under `/api/v1/...`. The old versionless HTTP aliases are retired.
 
 #### `GET /api/v1/git/status`
+
+Source-review counts retain heartbeat-observed aircraft for the configured
+Overview Available window, including a brief loss; expired/offline records stay
+in diagnostic rows but do not contribute to the notice. Counts are not update
+eligibility or flight readiness. Unknown worktree evidence is never counted as
+synced. An unavailable/invalid presence snapshot returns `503` rather than a
+false empty-fleet/all-clear response. Update routes retain fresh-evidence checks.
 Get git status from all drones.
 
 **Response:**
@@ -2189,6 +2466,97 @@ Not every current GCS API domain needs to move under `/api/v1/...`.
 
 The versioning work after the main Phase 4 cleanup is therefore focused on stream-contract policy and route quality, not on renaming these already namespaced subsystem domains for the sake of uniformity alone.
 
+### Logging API: bounded sessions, exports and ULog requests
+
+The logging root remains `/api/logs`, not `/api/v1/logs`. GCS sessions use
+`GET /api/logs/sessions` and `GET /api/logs/sessions/{session_id}`. Aircraft
+session equivalents are under `/api/logs/drone/{drone_id}/sessions`. Live SSE
+stays under `/api/logs/stream` or the selected aircraft's `/stream`; stream
+connection/coverage is not aircraft health or complete historical coverage.
+
+Session content accepts `level`, `component`, `search`, `since`, `until`,
+`limit`, `offset` and `cursor`. Filters apply before pagination. `since` is
+exclusive and `until` inclusive; timestamps without an offset mean UTC.
+The default page limit is 500, accepted limits are 1–2,000, and the initial
+offset is 0–100,000. Search is bounded to 256 characters. Invalid limits/ranges
+return `422`, not an empty success.
+
+The response retains `session_id`, `count` and `lines`, adding
+`schema_version: "1.1"`, `snapshot_id`, `entry_offsets`, `has_more`,
+`next_cursor` and `coverage`. Coverage declares the page's byte interval,
+pinned snapshot/source sizes and skipped malformed, oversized or incomplete
+records. Pages have a 2 MiB record-data budget and 16 MiB scan budget; individual
+records over 256 KiB are skipped/reported, not fabricated. A zero-row page can
+still have continuation when filtering/scanning consumes its budget.
+
+Continue with the returned cursor and the same source/session/filters. Its
+read boundary excludes later appends. A restart, expired cursor, rotation,
+truncation or changed file/filter returns `409` and requires a fresh view;
+another file must never occupy an old cursor silently. Older companions that
+cannot provide the bounded query contract require an update for paged
+search/export.
+
+`POST /api/logs/export` and `POST /api/logs/drone/{drone_id}/export` accept:
+
+```json
+{
+  "session_ids": ["selected-session"],
+  "format": "zip",
+  "filters": {"level": "WARNING", "search": "timeout"}
+}
+```
+
+Exports traverse every continuation, not just the first page. Omit `filters`
+for full selected sessions. Preparation uses temporary files outside the event
+loop, a 128 MiB aggregate JSONL-data budget, 60-second deadline, two-export
+concurrency bound and disk-reserve checks. Busy returns `429`, oversized
+exports `413`, insufficient staging space `507`, and a changed source `409`.
+`X-MDS-Export-Records`, `X-MDS-Export-Skipped` and `X-MDS-Export-Scope` describe
+the produced artifact. Temporary exports are cleaned after streaming; this is
+not a persistent archive or a claim that the browser saved a file.
+
+Raw ULog creation remains
+`POST /api/logs/drone/{drone_id}/ulog/files/{log_id}/download`. Clients should
+persist the exact aircraft/file and an opaque `request_id` before posting:
+
+```json
+{"request_id": "ulog-request-example"}
+```
+
+The successful response retains `job` and `timestamp`, adding `request_id`.
+Legacy omitted IDs are generated internally. Accepted job IDs are signed,
+actor-and-aircraft-bound GCS handles, not native job tokens.
+
+Recover a lost response with
+`GET /api/logs/drone/{drone_id}/ulog/download-requests/{request_id}`. The
+response is `{request_id, status, job, error, timestamp}`: `status` is
+`accepted`, `unknown` or terminal `rejected`, and `job` is the protected job object or `null`, not a
+nested response envelope. The route is operator/admin-only. Another actor,
+aircraft or runtime cannot recover that receipt; conflicting reuse for another
+aircraft/file is rejected. A failed create response includes `request_id` and
+`creation_status: "unknown"` in its detail when acceptance remains uncertain.
+Only explicit evidence can produce `creation_status: "rejected"`: a durable
+GCS pre-handoff failure or a request-and-capability-bound native rejection
+before acceptance. Rejected receipts are recoverable through the same GET and
+allow a new explicit request with a new ID. Generic HTTP errors, transport loss
+or a missing-job `404` are not proof of rejection and remain unknown.
+
+The GCS commits bounded request metadata before calling the node. Duplicate
+known requests return the same job; uncertain requests are never silently
+resubmitted. Recovery uses native status lookup only. Native restart/expiry or
+an unavailable endpoint remains unknown/unavailable, not another staging
+attempt. Historical acceptance does not prove a staged file still exists:
+continue normal `/ulog/downloads/{handle}` polling and explicit content save.
+GCS/node receipt stores contain metadata only, capped at 16 MiB/1,024 identities
+with an 8 KiB envelope; capacity fails closed and preserves existing lookup
+identities rather than recycling them. No raw archive or node/root token is
+persisted in GCS request receipts.
+
+Raw transfer creation, request recovery, handles/content, staged-copy deletion
+and erase-all are excluded from model/MCP tools. Approved ULog inventory and
+derived-summary tools are unchanged. See the [logging guide](../guides/logging-system.md)
+for policy, roles, upload summaries and operator behavior.
+
 ### Stable Transport Roots
 
 The GCS WebSocket surface is also intentional and canonical.
@@ -2251,9 +2619,74 @@ ws.onmessage = (event) => {
 ```
 
 **Benefits:**
-- 95% less overhead vs HTTP polling
-- Real-time updates (1 Hz)
-- Automatic reconnection support
+- Periodic observations without one HTTP request per browser refresh.
+- Shared server-side publication and bounded latest-only delivery.
+- Reconnect starts with a complete current snapshot, not an event replay.
+
+#### Versioned shared observation snapshots
+
+Telemetry, heartbeat and Git sockets accept `protocol_version=1`. Their legacy
+`type`, `timestamp` and `data` shapes remain unchanged; telemetry additionally
+includes the canonical HTTP `display_policy`. The following fields are additive:
+
+```json
+{
+  "protocol_version": 1,
+  "stream_id": "publisher-epoch-uuid",
+  "sequence": 42,
+  "published_at_ms": 1700000000000,
+  "delivery": "latest_snapshot"
+}
+```
+
+`stream_id` identifies one publisher epoch, not an aircraft boot, mission or
+command. Sequence increases within that epoch; skipped numbers are expected
+when intermediate snapshots are coalesced. Consumers replace the complete
+topic snapshot, including aircraft removals, and reset sequence comparison on a
+new epoch. Unsupported protocol versions close with `1002`; these streams are
+read-only and reject application messages from clients. They are not a durable
+event history or a command-delivery/acknowledgement channel.
+
+Canonical HTTP reads remain available at `/api/v1/fleet/telemetry`,
+`/api/v1/fleet/heartbeats` and `/api/v1/git/status`. Adding
+`?protocol_version=1` returns the same metadata and shared generation for its
+topic. The existing HTTP domain body is unchanged (`telemetry`, `heartbeats`,
+or `git_status`, respectively). Unversioned HTTP remains a fresh direct read
+for compatibility. Shared publication intervals are 500 ms for telemetry,
+2 s for heartbeats and 5 s for Git; telemetry `interval_ms` still limits each
+client's outbound cadence to 500–6000 ms (default 1000 ms).
+
+Publication time and the HTTP `X-MDS-Server-Time` header are GCS observations,
+never FC freshness. A new frame can contain the same old or unavailable native
+sample. Native sample timestamps, unknown flight states, heartbeat-specific
+receipts and configuration/readiness authority are preserved. No cross-host
+clock subtraction or snapshot sequence grants flight admission.
+
+Each topic validates and serializes one generation for all socket consumers,
+with one pending latest snapshot per client. Limits are 128 subscribers/topic,
+8 MiB per encoded snapshot, a 5 s send deadline and a 15 s publication-idle
+deadline. Capacity/slow-consumer/idle failures close `1013`; a snapshot build
+failure closes `1011` (`observation_unavailable`) instead of fabricating an
+empty healthy fleet. Peer disconnects retire their subscriptions; the publisher
+stops when the last socket leaves. These are bounded implementation limits,
+not measured fleet-scale or network-throughput guarantees. Full snapshots still
+carry full fleet payloads; shared encoding does not itself compress bandwidth.
+
+When auth is enabled, sockets apply the canonical HTTP read-role restrictions
+and check current token revocation/expiry and user/session validity every 5 s
+(a send in progress is separately bounded to 5 s). Authentication/authorization
+failures close `1008`; versioned clients receive a reason of
+`authentication_required`, `permission_denied` or `origin_not_allowed`.
+Credential-store validation failures close `1011` (`authentication_unavailable`).
+Browser Origins must match the API host and its port or the standard dashboard/
+API ports, or an explicit existing `MDS_CORS_ALLOW_ORIGIN_REGEX` override.
+Native clients can omit Origin. Versioned clients use the normal session cookie
+or Authorization bearer header, never a token in the URL; legacy query-token
+compatibility is not extended to this protocol. The existing trusted-network
+auth-disabled lab posture and dashboard-only machine config access are unchanged.
+Logout alone does not revoke previously issued stateless session cookies;
+disable the user or let the session expire when immediate existing-session
+invalidation is required. No new authentication mode is introduced.
 
 ### `WS /ws/git-status`
 Real-time git status streaming (0.2 Hz).
@@ -2546,7 +2979,7 @@ The FastAPI implementation replaced the earlier Flask server, but the public con
 4. Check [api-modernization-blueprint.md](./api-modernization-blueprint.md) before assuming an older route is still supported
 
 ### Advantages of FastAPI
-- **3-5x faster** response times
+- Async HTTP and streaming primitives
 - **Automatic OpenAPI docs** at `/docs` and `/redoc`
 - **Type safety** with Pydantic validation
 - **WebSocket support** for real-time streaming
@@ -2555,17 +2988,13 @@ The FastAPI implementation replaced the earlier Flask server, but the public con
 
 ---
 
-## Performance Metrics
+## Performance evidence
 
-### HTTP Endpoints
-- Average response time: **10-50ms** (vs 30-150ms Flask)
-- Throughput: **1000-2000 req/s** (vs 300-500 req/s Flask)
-- Memory usage: Similar to Flask
-
-### WebSocket Endpoints
-- Connection overhead: **<1ms**
-- Message latency: **<5ms**
-- Concurrent connections: **1000+**
+Capacity and latency require a reproducible deployment/network benchmark. The
+shared observation publisher bounds subscribers, frame bytes, pending state and
+send time; these implementation limits are not a validated fleet-flight capacity.
+Measure source age, retries, bytes, queue wait, CPU/memory and healthy-consumer
+isolation. HTTP, stream and command acceptance tests establish different scopes.
 
 ---
 

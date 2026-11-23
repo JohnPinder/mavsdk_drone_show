@@ -109,7 +109,9 @@ Do **not** look for version numbers in the filename. Release versioning lives in
 ```bash
 cd ~
 # Public Mega download via the official MEGAcmd client; large archives may take several minutes.
-mega-get 'https://mega.nz/file/iLRG3I7a#5ktNslf4c8Ewekt_Fsw8Lu7WKGPLo98BLEowPVt2eDc' .
+mega-get 'https://mega.nz/file/eHBAGSAI#QJvpeEXvbvifpAhTMDs5rKPhRMu2bKzAbW1dgIbmHVk' .
+# Verify the v6 archive bytes before extracting.
+printf '%s  %s\n' 'ed66ea06ca31db6ae1e15ea7e46b4f3e0997de1aaf9ddd9018e76daf61ec3c0c' 'mavsdk-drone-show-sitl-image.7z' | sha256sum -c -
 # Validate the archive before extracting it.
 7z t mavsdk-drone-show-sitl-image.7z
 # Extraction also takes time on large images.
@@ -150,7 +152,13 @@ docker image ls mavsdk-drone-show-sitl
 
 You should see the current official tags, including:
 - `mavsdk-drone-show-sitl:latest`
-- `mavsdk-drone-show-sitl:v5`
+- `mavsdk-drone-show-sitl:v6`
+
+This archive bakes the reviewed SDK 4 runtime at source `0bc368cb` and uses
+CPython 3.12.16. Its two/three-aircraft native acceptance and later host-tool /
+companion-provisioning follow-ups are separated in the
+[release evidence](../plans/2026-11-12-sdk4-image-release-acceptance.md).
+Image acceptance is not hardware flight clearance.
 
 After a successful `docker load`, you can reclaim several GB on smaller VPSes by deleting the temporary archive files:
 
@@ -194,7 +202,7 @@ Moreover, it has an auto hardware ID detection and instance creation system for 
 > - for promotion-grade regression runs on a long-lived host, do not mix an older baked image with boot-time repo sync to a newer commit; use a fresh image rebuild plus `MDS_SITL_GIT_SYNC=false` and usually `MDS_SITL_REQUIREMENTS_SYNC=false`
 > - image prep writes build metadata and PX4 provenance into the repo root so startup logs can show what was baked into the image
 > - `requirements.txt` changes trigger a venv sync automatically; unchanged requirements do not reinstall on every boot unless runtime validation detects an unhealthy preserved `venv`
-> - runtime file logs are bounded by default so containers stay small, common PX4 `pxh>` prompt noise is reduced in the raw SITL log, and those logs disappear when the container is removed
+> - runtime file logs are bounded by default so containers stay small; PX4 uses foreground daemon mode without an interactive console, and those logs disappear when the container is removed
 > - `QT_QPA_PLATFORM=offscreen` is set automatically for headless runs
 > - each drone gets its own Gazebo transport partition by default to avoid cross-container interference
 > - legacy Gazebo Classic / jMAVSim modes are no longer the supported Docker SITL path
@@ -272,7 +280,6 @@ npm ci
 bash ~/mavsdk_drone_show/app/linux_dashboard_start.sh --sitl
 ```
 
-- `--sitl` by itself starts the dashboard in **development mode**: React `npm start` on port `3030` plus FastAPI with auto-reload on port `5030`.
 - `--sitl` by itself starts the dashboard in **development mode**: React `npm start` on port `3030` plus FastAPI on port `5030`, but the backend now stays single-process by default so telemetry, heartbeats, command tracking, and other in-memory runtime state remain coherent during live SITL operations.
 - Backend auto-reload is now an explicit debug override only. Set `export MDS_GCS_BACKEND_RELOAD=true` only when you are actively editing backend Python code and accept that live operational state may become inconsistent while reload is enabled.
 - Use `bash ~/mavsdk_drone_show/app/linux_dashboard_start.sh --prod --sitl` when you want the optimized production-style launch instead.
@@ -571,12 +578,13 @@ Smart Swarm is the live leader-follower mission mode in MDS. For the current ope
 Current behavior summary:
 
 - single-drone commands remain scoped to the addressed drone
-- swarm-level intent should use the `Smart Swarm Runtime` controls on the `Swarm Design` page
-- use `Overview` to confirm live `READY` state before you start Smart Swarm from the dashboard
-- use `Formation Analysis` to choose a specific cluster; `All executable clusters` is plot-only and does not become one fleet-wide runtime target
+- use `Smart Swarm -> Operate` for cluster Takeoff, Start Swarm, and Managed Return; `Design Swarm` owns formation setup
+- use `Overview` for fleet awareness and general aircraft commands, not mission starts; confirm the complete intended cluster and fresh readiness in `Smart Swarm -> Operate` before starting
+- choose a specific formation in the Smart Swarm workspace; `All clusters` is a combined inspection view, not one fleet-wide runtime target, and Overview target selection does not retarget that formation
 - followers do not silently stop just because one unrelated drone receives an individual override
 - if the addressed drone is a leader or relay leader, followers can still react through leader-loss logic
-- leader-loss handling now defaults to an `upstream_or_hold` policy instead of jumping across unrelated drones
+- leader-loss handling defaults to `hold_recover`: protective Hold with bounded
+  recovery of the same leader, not automatic promotion or an unrelated leader
 
 If you need a proof run that records expected vs actual follower tracking during
 leader jogs and frame changes, use:

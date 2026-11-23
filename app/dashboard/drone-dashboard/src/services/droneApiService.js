@@ -44,7 +44,7 @@ export const buildActionCommand = (actionType, droneIds = [], triggerTime = 0) =
   };
 };
 
-const createCommandIdempotencyKey = () => {
+export const createCommandIdempotencyKey = () => {
   const browserCrypto = typeof window === 'undefined' ? null : window.crypto;
   if (typeof browserCrypto?.randomUUID === 'function') {
     return `dashboard-${browserCrypto.randomUUID()}`;
@@ -165,18 +165,18 @@ export const getCommandStatus = async (commandId) => {
   }
 };
 
-export const getRecentCommands = async ({ limit = 8, status = null, missionType = null } = {}) => {
+export const getRecentCommands = async ({ limit = 8, status = null, missionType = null } = {}, config = {}) => {
   try {
-    const response = await getRecentCommandsResponse({ limit, status, missionType });
+    const response = await getRecentCommandsResponse({ limit, status, missionType }, config);
     return response.data;
   } catch (error) {
     throw error;
   }
 };
 
-export const getActiveCommands = async () => {
+export const getActiveCommands = async (config = {}) => {
   try {
-    const response = await getActiveCommandsResponse();
+    const response = await getActiveCommandsResponse(config);
     return response.data;
   } catch (error) {
     throw error;

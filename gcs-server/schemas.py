@@ -22,6 +22,7 @@ from src.command_execution_contract import DroneExecutionOutcome
 from src.execution_evidence import ActionResultEvidence, normalize_execution_evidence
 from src.control_release_protocol import ControlReleaseResult
 from src.enums import CommandOutcome, CommandPhase, CommandStatus
+from src.swarm_trajectory_contract import SwarmTrajectoryPackage
 from command_contract import SubmitCommandRequest as SharedSubmitCommandRequest
 
 
@@ -119,8 +120,64 @@ class SwarmConfig(BaseModel):
     revision: str = Field("", description="Deterministic topology revision for conflict detection")
 
 
+class TrajectoryFormationRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    assignments: List[SwarmAssignment] = Field(min_length=1)
+    revision: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class TrajectoryFormationResponse(TrajectoryFormationRequest):
+    assignments: List[SwarmAssignment] = Field(default_factory=list)
+    success: bool
+    saved: bool
+
+
 class SwarmConfigApplyRequest(SwarmConfig):
     acknowledged_unavailable_hw_ids: List[str] = Field(default_factory=list)
+    require_inactive_hw_ids: List[str] = Field(default_factory=list,
+        description="Optional capture-derived draft guard; unknown/active nodes reject without writing")
+
+    @field_validator('require_inactive_hw_ids')
+    @classmethod
+    def validate_inactive_ids(cls, values):
+        if any(not hw.isdecimal() or int(hw) <= 0 or str(int(hw)) != hw for hw in values):
+            raise ValueError('Inactive scope requires canonical positive hardware IDs')
+        return sorted(set(values), key=int)
+
+    @model_validator(mode='after')
+    def require_guarded_revision(self):
+        if self.require_inactive_hw_ids and (len(self.revision) != 64 or any(c not in '0123456789abcdef' for c in self.revision)):
+            raise ValueError('An inactive-only Apply requires the reviewed formation revision')
+        return self
+
+
+class SwarmCapturePreviewRequest(BaseModel):
+    """Frozen position capture into an unsaved full-formation draft."""
+    model_config = ConfigDict(extra='forbid')
+    revision: str = Field(pattern=r'^[a-f0-9]{64}$')
+    assignments: List[SwarmAssignment] = Field(min_length=1)
+    cluster_id: str = Field(pattern=r'^[1-9][0-9]*$')
+    frame: Literal['ned', 'body'] = 'ned'
+    height_mode: Literal['keep', 'level', 'current'] = 'keep'
+    leader_hw_id: Optional[str] = Field(None, pattern=r'^[1-9][0-9]*$')
+
+
+class SwarmCapturePreviewResponse(BaseModel):
+    capture_id: str
+    captured_at_ms: int
+    revision: str
+    cluster_id: str
+    assignments: List[SwarmAssignment]
+    headings: Dict[str, float]
+    observations: Dict[str, Dict[str, Any]]
+    reference: Dict[str, float]
+    height_mode: Literal['keep', 'level', 'current']
+    current_heights_available: bool = False
+    current_heights_reason: Optional[str] = None
+    flight_state: Literal['grounded', 'airborne', 'mixed'] = 'mixed'
+    recommended_height_mode: Optional[Literal['current', 'level']] = None
+    saved: Literal[False] = False
+    commands_sent: Literal[False] = False
 
 
 class SwarmPublishRequest(BaseModel):
@@ -140,6 +197,9 @@ class SwarmConfigSaveResponse(BaseModel):
 class SwarmAssignmentPatchRequest(BaseModel):
     """Patch payload for one saved swarm assignment."""
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
+
+    revision: Optional[str] = Field(None, pattern=r'^[a-f0-9]{64}$')
+    acknowledged_unavailable_hw_ids: List[str] = Field(default_factory=list)
 
     follow: Optional[int] = Field(None, ge=0, description="Leader hw_id to follow (0 = independent)")
     offset_x: Optional[float] = Field(None, description="Offset axis 1: North (ned) or Forward (body), meters")
@@ -530,12 +590,47 @@ class DroneTelemetry(BaseModel):
         return str(value)
 
 
+class OverviewDisplayPolicy(BaseModel):
+    """Heartbeat display windows only; not readiness or command authority."""
+
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    stale_sec: float = Field(..., gt=0, description="Heartbeat age after which Overview shows a stale cue")
+    available_sec: float = Field(..., gt=0, description="Maximum heartbeat age retained by Overview Available")
+
+    @model_validator(mode='after')
+    def validate_window_order(self):
+        if self.stale_sec > self.available_sec:
+            raise ValueError("Overview stale cue must not exceed the Available window")
+        return self
+
+    @classmethod
+    def resolve_default(cls):
+        from overview_display_policy import resolve_overview_display_policy
+
+        return cls(**resolve_overview_display_policy())
+
+
+class ObservationSnapshotMetadata(BaseModel):
+    """GCS publication identity, never aircraft freshness or execution evidence."""
+
+    protocol_version: Literal[1]
+    stream_id: str = Field(min_length=1, description="Publisher epoch; sequence restarts only in a new epoch")
+    sequence: int = Field(ge=1, description="Publication sequence; latest-only delivery may skip generations")
+    published_at_ms: int = Field(ge=0, description="GCS wall-clock publication time, not an FC sample time")
+    delivery: Literal["latest_snapshot"]
+
+
 class TelemetryResponse(BaseModel):
     """Response for GET /telemetry"""
     telemetry: Dict[str, DroneTelemetry] = Field(..., description="Telemetry by pos_id")
     total_drones: int = Field(..., ge=0, description="Total drones")
     online_drones: int = Field(..., ge=0, description="Online drones")
     timestamp: int = Field(..., description="Server timestamp (Unix ms)")
+    display_policy: OverviewDisplayPolicy = Field(
+        default_factory=OverviewDisplayPolicy.resolve_default,
+        description="Overview heartbeat-display windows; never flight readiness or command admission",
+    )
 
     @field_validator('telemetry', mode='before')
     @classmethod
@@ -544,6 +639,10 @@ class TelemetryResponse(BaseModel):
         if isinstance(value, dict):
             return {str(key): payload for key, payload in value.items()}
         return value
+
+
+class TelemetrySnapshotResponse(TelemetryResponse, ObservationSnapshotMetadata):
+    """Opt-in versioned HTTP view of the shared telemetry publication."""
 
 
 class FleetActionReadinessTarget(BaseModel):
@@ -595,6 +694,10 @@ class HeartbeatResponse(BaseModel):
     online_count: int = Field(..., ge=0, description="Online drones")
     state_counts: Dict[str, int] = Field(default_factory=dict, description="Heartbeat rows counted by canonical presence_state")
     timestamp: int = Field(..., description="Server timestamp (Unix ms)")
+
+
+class HeartbeatSnapshotResponse(HeartbeatResponse, ObservationSnapshotMetadata):
+    """Opt-in versioned HTTP view of the shared heartbeat publication."""
 
 
 class HeartbeatRequest(BaseModel):
@@ -653,6 +756,7 @@ class HeartbeatRequest(BaseModel):
 class HeartbeatPostResponse(BaseModel):
     """Response for POST /api/v1/fleet/heartbeats"""
     success: bool = Field(..., description="Heartbeat received status")
+    accepted: bool = Field(True, description="Whether native heartbeat policy accepted this observation")
     message: str = Field(..., description="Status message")
     server_time: int = Field(..., description="Server timestamp (Unix ms)")
 
@@ -902,6 +1006,10 @@ class GitStatusResponse(BaseModel):
     timestamp: int = Field(..., description="Server timestamp (Unix ms)")
 
 
+class GitStatusSnapshotResponse(GitStatusResponse, ObservationSnapshotMetadata):
+    """Opt-in versioned HTTP view of the shared software publication."""
+
+
 class FleetGitSyncApplyResponse(BaseModel):
     """Response for a GCS-managed git sync operation."""
     success: bool = Field(..., description="Sync operation status")
@@ -980,7 +1088,7 @@ class SwarmTrajectoryProcessRequest(BaseModel):
 
     model_config = ConfigDict(extra='forbid')
 
-    force_clear: bool = Field(False, description="Clear processed outputs before generating a fresh package")
+    force_clear: bool = Field(False, description="Regenerate all paths without auto-reloading; preserve the previous package until publication")
     auto_reload: bool = Field(True, description="Auto-include unchanged leader uploads from the active workspace")
 
 
@@ -1117,7 +1225,7 @@ class SwarmTrajectoryProcessingJobResponse(BaseModel):
     job_id: str = Field(..., description="Processing job ID")
     status: SwarmTrajectoryProcessingJobState = Field(..., description="Current job state")
     phase: str = Field(..., description="Current processing phase")
-    progress_percent: int = Field(..., ge=0, le=100, description="Best-effort progress")
+    progress_percent: Optional[int] = Field(None, ge=0, le=100, description="Measured progress, or null when indeterminate")
     message: Optional[str] = Field(None, description="Operator-facing job status")
     result: Optional[Dict[str, Any]] = Field(None, description="Process result when succeeded")
     error_code: Optional[str] = Field(None, description="Stable failure code")
@@ -1152,6 +1260,7 @@ class SwarmTrajectoryProcessingChanges(BaseModel):
     swarm_structure_changed: bool = Field(..., description="Whether swarm relationships changed since last process")
     parameters_changed: bool = Field(..., description="Whether trajectory processing parameters changed")
     trajectory_files_changed: bool = Field(..., description="Whether uploaded leader CSV contents changed")
+    processed_outputs_changed: bool = Field(False, description="Whether generated CSV identity changed or was never verified")
     new_uploads: List[int] = Field(default_factory=list, description="Leader IDs newly uploaded since last process")
     missing_uploads: List[int] = Field(default_factory=list, description="Leader IDs removed since last process")
     leader_structure_changed: bool = Field(..., description="Whether leader coverage changed in a way that invalidates outputs")
@@ -1261,6 +1370,8 @@ class SwarmTrajectoryStatusPayload(BaseModel):
     processed_drones: List[int] = Field(default_factory=list, description="Drone IDs with processed outputs")
     processed_leaders: List[int] = Field(default_factory=list, description="Leader IDs with processed outputs")
     processed_followers: List[int] = Field(default_factory=list, description="Follower IDs with processed outputs")
+    unassigned_processed_drones: List[int] = Field(default_factory=list,
+        description="Retained output IDs absent from this mission formation; not fleet membership")
     follow_map: Dict[str, int] = Field(default_factory=dict, description="Current follow assignments keyed by drone ID")
     leader_count: int = Field(..., ge=0, description="Processed leader count")
     follower_count: int = Field(..., ge=0, description="Processed follower count")
@@ -1295,6 +1406,16 @@ class SwarmTrajectoryStatusResponse(BaseModel):
     success: Literal[True] = Field(True, description="Always true for successful responses")
     status: SwarmTrajectoryStatusPayload = Field(..., description="Current workspace state")
     folders: Dict[str, str] = Field(default_factory=dict, description="Active raw/processed/plot workspace paths")
+
+
+class SwarmTrajectoryWorkspaceResponse(BaseModel):
+    status: SwarmTrajectoryStatusPayload
+    validation: SwarmTrajectoryValidationResponse
+    formation: TrajectoryFormationResponse
+    launch_identity: Optional[SwarmTrajectoryPackage] = None
+    preview: SwarmTrajectoryPreviewResponse
+    simulation_mode: bool
+    timestamp: int
 
 
 class SwarmTrajectoryProcessingStatistics(BaseModel):
@@ -1472,12 +1593,21 @@ class CustomShowInfoResponse(BaseModel):
     """Response for GET /api/v1/shows/custom"""
     exists: bool = Field(..., description="Whether an active custom CSV exists")
     filename: str = Field(..., description="Active custom CSV filename")
+    sha256: Optional[str] = Field(None, description="GCS CSV review fingerprint; not drone-side execution binding")
     row_count: int = Field(..., ge=0, description="Number of trajectory rows")
     duration_sec: float = Field(..., ge=0, description="Total trajectory duration in seconds")
     max_altitude: float = Field(..., ge=0, description="Maximum altitude above launch frame in meters")
     preview_exists: bool = Field(..., description="Whether a preview image has been generated")
+    preview_themes: Dict[str, bool] = Field(default_factory=dict, description="Available light/dark preview variants")
     execution_mode: str = Field(..., description="Execution mode summary")
     required_columns: List[str] = Field(default_factory=list, description="Required CSV protocol columns")
+
+
+class CustomShowPreviewResponse(BaseModel):
+    """Image-only regeneration result; no change to flight CSV identity."""
+    success: bool
+    preview_generated: bool
+    preview_themes: Dict[str, bool]
 
 
 class CustomShowImportResponse(BaseModel):
@@ -2088,6 +2218,10 @@ class TelemetryStreamMessage(WebSocketMessage):
         return value
 
 
+class TelemetrySnapshotStreamMessage(TelemetryStreamMessage, ObservationSnapshotMetadata):
+    display_policy: OverviewDisplayPolicy
+
+
 class GitStatusStreamMessage(WebSocketMessage):
     """WebSocket git status stream message"""
     type: str = Field(default="git_status", description="Message type")
@@ -2099,6 +2233,14 @@ class HeartbeatStreamMessage(WebSocketMessage):
     """WebSocket heartbeat stream message"""
     type: str = Field(default="heartbeat", description="Message type")
     data: List[HeartbeatData] = Field(..., description="Heartbeat data for all drones")
+
+
+class GitStatusSnapshotStreamMessage(GitStatusStreamMessage, ObservationSnapshotMetadata):
+    pass
+
+
+class HeartbeatSnapshotStreamMessage(HeartbeatStreamMessage, ObservationSnapshotMetadata):
+    pass
 
 
 # ============================================================================
@@ -2274,6 +2416,7 @@ class CommandStatusResponse(BaseModel):
     target_drones: List[str] = Field(..., description="Target drone hardware IDs")
     params: Dict[str, Any] = Field(default_factory=dict, description="Command parameters")
     swarm_runtime: Optional[Dict[str, Any]] = None
+    coordinated_takeoff: Optional[Dict[str, Any]] = None
     status: CommandStatus = Field(..., description="Current command status")
     phase: CommandPhase = Field(..., description="Operational phase separating ACK collection from actual execution")
     outcome: Optional[CommandOutcome] = Field(None, description="Terminal outcome when the command has finished")

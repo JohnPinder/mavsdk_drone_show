@@ -114,12 +114,14 @@ If Fleet Ops shows the dashboard icon as local-only, the node is probably still
 reporting `127.0.0.1:9080`; use SSH tunneling or change the listen address
 through the node-local env workflow.
 
-Remote Smart Wi-Fi dashboard mutation is intentionally stricter than viewing the
-page. Smart Wi-Fi Manager allows writes from loopback, but remote writes require
-`SMART_WIFI_MANAGER_API_TOKEN` and a token-aware client header. If a field
-operator can open the dashboard but deleting or saving a profile returns
-`SMART_WIFI_MANAGER_API_TOKEN is required for remote mutating requests`, use
-Fleet Ops Wi-Fi or an SSH tunnel for that board instead of disabling the guard.
+Remote Smart Wi-Fi dashboard mutation is intentionally authenticated. The pinned
+v2.1.14 supports normal browser login plus its bundled CSRF header; machine
+clients may use `SMART_WIFI_MANAGER_API_TOKEN`. MDS's node-local proxy uses
+loopback. Provision the sidecar browser login once using its own installer;
+MDS updates preserve that root-local authentication. Port access is not edit
+authorization. If an older/unprovisioned page reports a required token, follow
+the [dashboard setup](smart-wifi-manager-dashboard.md), or use Fleet Ops Wi-Fi /
+an SSH tunnel. Do not disable the guard or store credentials in fleet profiles.
 
 ## Transport And Internet Reporting
 
@@ -152,7 +154,9 @@ metrics decide which active transport carries traffic when Ethernet, Wi-Fi, and
 Nodes also report a cached internet probe. Keep the default low-rate ICMP check
 or set `MDS_INTERNET_CHECK_PORT` to use a TCP check against an operator-owned
 endpoint. The internet probe is diagnostic only; GCS reachability and MAVLink
-health remain the flight-control signals.
+health remain the flight-control signals. Bootstrap and image preparation
+install `iputils-ping`. A missing probe utility or an ICMP execution error is
+reported as unknown, not a lost link.
 
 ## Failure Handling
 
@@ -161,6 +165,75 @@ health remain the flight-control signals.
 - hash mismatch means the node has not applied the current desired profile.
 - dashboard links are optional diagnostics; the compliance summary in Fleet Ops
   is the primary operator signal.
+
+## Link evidence and display continuity
+
+Companion heartbeats, FC telemetry freshness, Internet reachability and command
+acceptance are different observations. A Wi-Fi strength gauge is not an
+end-to-end latency measurement. Fleet telemetry REST/WS responses join accepted
+heartbeat metadata at read time, independently of FC telemetry-poll backoff;
+they do not refresh the FC sample or grant command readiness.
+
+Overview keeps raw ages and unknown flight state immediate, while routine link
+attention settles for 3 seconds and clears after 2 seconds of stable recovery.
+Missing initial data and already-offline/urgent conditions are not hidden. A
+configuration refresh error is reported separately from a telemetry outage.
+The existing 10-second stale/60-second Available display windows are unchanged.
+
+### Shared observations and transport recovery
+
+The [communications modernization plan](../plans/2026-11-15-communications-modernization.md)
+defines shared snapshot/subscription ownership, HTTP compatibility, bounded
+delivery, identity/clock contracts, migration slices and validation gates.
+Current-source behavior is described below; release/image and hardware acceptance
+must cite the matching validation record. Source age is not pure network latency.
+See the [source and SITL validation record](../plans/2026-11-15-communications-validation.md)
+for measured capacity, fault coverage and the separate image/hardware boundaries.
+
+The GCS owns one per-aircraft supervisory acquisition task: node-state WebSocket
+after a valid identity-matching sample, with independent sequential pooled HTTP
+fallback while connecting, unsupported, silent or disconnected. Handshake probes
+have separate capacity from HTTP acquisition. An old endpoint/HTTP response cannot
+overwrite a newer stream generation. Native measurement clocks are unchanged.
+
+Overview, Globe and canonical fleet readers share an authenticated browser
+observation owner. Shell monitoring continues across navigation. One resource
+owner manages valid-data idle detection, bounded reconnect and HTTP fallback;
+opening a socket is not application freshness. Configuration, software and
+runtime reads are shared rather than polled separately by shell and page.
+Late callbacks from a previous user/runtime/connection are fenced. A new receipt
+of a cached sample never changes its native measurement timestamp.
+
+GCS telemetry, heartbeat and Git WebSockets publish bounded latest-state
+generations shared by subscribers. Optional `protocol_version=1` adds producer
+epoch/sequence and complete-snapshot semantics, also available on HTTP snapshots.
+Sequence gaps are permitted for coalesced state; reconnect obtains a complete
+snapshot. There is no replay queue of flight commands in this transport.
+Legacy HTTP and WS payload contracts remain available over the same services.
+
+Commands, bulk transfers and direct flight-control traffic retain distinct
+ownership and capacity. Native preparation/capture, exact recipients and the
+optional MCP boundary are unchanged. Logs retain their selected-source event
+stream and coverage contract; parameters retain explicit reviewed transactions.
+
+The local MAVLink receiver binds state to a classified flight-controller
+heartbeat source, independently of MDS hardware/position IDs. Estimator/health
+messages require that FC component; raw GPS/battery peripherals may use another
+component in the bound system. A second FC cannot silently replace the owner.
+An explicit configured `mav_sys_id`, when supplied, constrains discovery; no
+firmware parameter is changed. This prevents accidental source mixing, not
+spoofing of the same source header. Fix routing/configuration and restart the
+receiver after an identity collision; a network timeout never reassigns ownership.
+
+Further payload deltas, compression, brokers and new transports remain conditional
+on measured benefit. No fixed percentage bandwidth saving or cellular flight
+performance is promised.
+
+Smart Swarm's aircraft-to-aircraft leader-state WS stream and HTTP fallback are
+already separate from dashboard monitoring. Evaluate their existing source-age,
+sequence, boot-clock and fallback evidence separately; compare direct local and
+VPN/relay paths before changing stream rates or reconnect budgets. Do not route
+flight-critical following through a browser or optional MCP/assistant layer.
 
 Related guides:
 

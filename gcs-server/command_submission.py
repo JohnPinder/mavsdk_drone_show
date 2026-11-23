@@ -6,6 +6,7 @@ import hashlib
 import json
 import time
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
@@ -38,6 +39,7 @@ from schemas import (
     SubmitCommandRequest,
 )
 from target_command_payloads import per_target_payload_digests, validate_per_target_payloads
+from swarm_configuration_guard import configuration_lock
 _ensure_sitl_callback_endpoint_matches = ensure_sitl_callback_endpoint_matches
 
 
@@ -291,6 +293,11 @@ async def submit_tracked_command(
 
     target_hw_ids = [str(drone["hw_id"]) for drone in actual_targets]
 
+    if resolved_mission == deps.Mission.TAKE_OFF:
+        mode = (command_data.get('takeoff_mode') or 'coordinated') if len(target_hw_ids) > 1 else 'independent'
+        command_data['takeoff_mode'] = mode
+        dispatch_payload['takeoff_mode'] = mode
+
     if resolved_mission == deps.Mission.SMART_SWARM:
         from smart_swarm_service import build_preview
         from smart_swarm_targets import validate_cluster_targets
@@ -300,8 +307,7 @@ async def submit_tracked_command(
             validate_cluster_targets(
                 assignments, target_hw_ids,
                 excluded=command.smart_swarm.excluded_hw_ids if command.smart_swarm else (),
-                unavailable=[member['hw_id'] for cluster in preview['clusters']
-                             for member in cluster['members'] if not member['available']],
+                references=command.smart_swarm.reference_hw_ids if command.smart_swarm else (),
             )
         except (ValueError, TypeError, KeyError) as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -361,7 +367,7 @@ async def submit_tracked_command(
         )
         command_data["smart_swarm"] = session.model_dump(mode="json")
         dispatch_payload["smart_swarm"] = command_data["smart_swarm"]
-    if resolved_mission == deps.Mission.SWARM_TRAJECTORY and normalized_target_ids:
+    if resolved_mission == deps.Mission.SWARM_TRAJECTORY:
         try:
             status_payload = deps.swarm_trajectory_service.get_processing_status_payload()["status"]
             structure = {
@@ -409,9 +415,53 @@ async def submit_tracked_command(
                 detail="Unsafe Swarm Trajectory target set. " + "; ".join(formatted_issues[:4]),
             )
 
+        # File presence and a valid target chain do not establish package
+        # freshness. Apply the same canonical validation used by review and
+        # publication to every launch, including the implicit all-fleet scope.
+        # A subset does not bypass a stale or incomplete package revision.
+        try:
+            validation = deps.swarm_trajectory_service.get_validation_payload()
+            if not isinstance(validation, dict):
+                raise ValueError("Validation response is unavailable")
+            blockers = validation.get("blockers")
+            if not isinstance(blockers, list):
+                raise ValueError("Validation blockers are unavailable")
+            if any(not isinstance(item, dict) for item in blockers):
+                raise ValueError("Validation blockers are malformed")
+        except Exception as exc:
+            deps.log_system_error(f"Swarm Trajectory validation failed: {exc}", "command")
+            raise HTTPException(
+                status_code=409,
+                detail=("Swarm Trajectory readiness could not be verified. "
+                        "Refresh the mission review before starting. No command was dispatched."),
+            ) from exc
+
+        if validation.get("success") is not True or validation.get("ready") is not True or blockers:
+            reasons = [str(item["message"]) for item in blockers[:4] if item.get("message")]
+            reason = "; ".join(reasons) or "Package validation has not confirmed readiness."
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Swarm Trajectory is not ready: {reason} "
+                        "Review and regenerate the package before starting. No command was dispatched."),
+            )
+
+    if resolved_mission == deps.Mission.SWARM_TRAJECTORY:
+        from src.swarm_trajectory_contract import SwarmTrajectoryPackage
+        try:
+            package = SwarmTrajectoryPackage.model_validate(
+                deps.swarm_trajectory_service.get_dispatch_package_payload(target_hw_ids))
+            if command.swarm_trajectory is not None and command.swarm_trajectory != package:
+                raise ValueError('The reviewed trajectory package changed; review it again')
+        except Exception as exc:
+            raise HTTPException(409, f'Trajectory package could not be bound to this launch: {exc}') from exc
+        command_data['swarm_trajectory'] = package.model_dump(mode='json')
+        dispatch_payload['swarm_trajectory'] = command_data['swarm_trajectory']
+
     if resolved_mission == deps.Mission.SMART_SWARM:
-        from swarm_start_readiness import require_start_admissions
-        await require_start_admissions(deps, actual_targets)
+        from swarm_start_readiness import require_start_admissions, require_reference_admissions
+        await require_start_admissions(deps, actual_targets,
+            scoped=bool(command.smart_swarm and command.smart_swarm.reference_hw_ids))
+        await require_reference_admissions(deps, command.smart_swarm.reference_hw_ids if command.smart_swarm else [])
 
     mission_type_int = resolved_mission.value
     launch_preparation_required = deps.mission_requires_launch_armability_probe(resolved_mission)
@@ -457,35 +507,43 @@ async def submit_tracked_command(
     command_id: Optional[str] = None
     launched = False
     try:
-        creation_result = await tracker.create_or_replay_command(
-            mission_type=mission_type_int,
-            target_drones=target_hw_ids,
-            params={
-                "trigger_time": trigger_time,
-                **(
-                    {"per_target_payload_sha256": per_target_payload_digests(normalized_per_target_payloads)}
-                    if normalized_per_target_payloads
-                    else {}
-                ),
-                **{
-                    k: v
-                    for k, v in command_data.items()
-                    if k not in [
-                        "idempotency_key",
-                        "mission_type",
-                        "trigger_time",
-                        "target_drone_ids",
-                        "target_scope",
-                    ]
+        # Sampling/preflight happens outside this short local transaction.
+        # A capture-derived inactive Apply and every generic Smart Swarm Start
+        # registration share it, including Starts without an explicit session.
+        async with (configuration_lock(deps) if resolved_mission == deps.Mission.SMART_SWARM else nullcontext()):
+            if resolved_mission == deps.Mission.SMART_SWARM:
+                from src.smart_swarm_contract import topology_revision
+                if (command_data.get('smart_swarm') or {}).get('revision') != topology_revision(deps.load_swarm() or []):
+                    raise HTTPException(409, 'Swarm configuration changed during Start review; review the saved layout')
+            creation_result = await tracker.create_or_replay_command(
+                mission_type=mission_type_int,
+                target_drones=target_hw_ids,
+                params={
+                    "trigger_time": trigger_time,
+                    **(
+                        {"per_target_payload_sha256": per_target_payload_digests(normalized_per_target_payloads)}
+                        if normalized_per_target_payloads
+                        else {}
+                    ),
+                    **{
+                        k: v
+                        for k, v in command_data.items()
+                        if k not in [
+                            "idempotency_key",
+                            "mission_type",
+                            "trigger_time",
+                            "target_drone_ids",
+                            "target_scope",
+                        ]
+                    },
                 },
-            },
-            timeout_ms=provisional_timeout_ms,
-            idempotency_key=idempotency_key,
-            request_fingerprint=request_fingerprint,
-            preparation_required=launch_preparation_required,
-            start_preparing=True,
-            completion_authority=completion_authority,
-        )
+                timeout_ms=provisional_timeout_ms,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                preparation_required=launch_preparation_required,
+                start_preparing=True,
+                completion_authority=completion_authority,
+            )
         command_id = creation_result.command_id
 
         if creation_result.replayed:

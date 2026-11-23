@@ -7,6 +7,7 @@ set -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MDS_REPO_ROOT="$REPO_ROOT"
+source "$SCRIPT_DIR/container_resources.sh"
 DEPLOYMENT_PROFILE_LOADER="$REPO_ROOT/tools/load_deployment_profile.sh"
 RUNTIME_PATH_HELPER="$REPO_ROOT/tools/shell_runtime_paths.sh"
 if [[ -f "$DEPLOYMENT_PROFILE_LOADER" ]]; then
@@ -557,6 +558,7 @@ create_instance() {
         --network "$DOCKER_NETWORK_NAME"
         --ip "$IP_ADDRESS"
         --restart "$DOCKER_RESTART_POLICY"
+        "${DOCKER_RESOURCE_ARGS[@]}"
         -e "MDS_HW_ID=${drone_id}"
         "${DOCKER_ENV_ARGS[@]}"
         "${DOCKER_SECRET_ARGS[@]}"
@@ -573,6 +575,7 @@ create_instance() {
     if [[ "${USE_HOST_STARTUP_SCRIPT}" == "true" ]]; then
         startup_script_container="$STARTUP_SCRIPT_CONTAINER"
         docker_run_args+=(-v "${STARTUP_SCRIPT_HOST}:${STARTUP_SCRIPT_CONTAINER}:ro")
+        docker_run_args+=(-v "${REPO_ROOT}/tools/git_token_askpass.sh:/tmp/git_token_askpass.sh:ro")
     fi
 
     startup_bootstrap="mkdir -p '$RUNTIME_CONTAINER_DIR/logs' && exec bash '$startup_script_container'"
@@ -726,6 +729,7 @@ main() {
     validate_input "$num_instances"
     resolve_host_startup_script_mode
     validate_launcher_configuration
+    sitl_configure_resource_limits
 
     collect_mds_env_args
     print_launcher_configuration

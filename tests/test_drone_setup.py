@@ -112,6 +112,7 @@ def create_mock_drone_config():
     drone_config.trigger_time = 0
     drone_config.config = {'pos_id': 1, 'hw_id': '1'}
     drone_config.hw_id = '1'
+    drone_config.swarm_trajectory_request = {'revision': 'test-revision', 'files': {'1': 'a' * 64}}
     drone_config.is_armed = False
     drone_config.is_ready_to_arm = True
     drone_config.current_command_id = None
@@ -227,6 +228,47 @@ class TestScheduleMission:
         earlier_trigger = trigger_time - trigger_sooner
 
         assert earlier_trigger == trigger_time - 4
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('mission,lead', [
+        (Mission.DRONE_SHOW_FROM_CSV, 10), (Mission.CUSTOM_CSV_DRONE_SHOW, 10), (Mission.HOVER_TEST, 10),
+        (Mission.LAND, 4), (Mission.HOLD, 4), (Mission.RETURN_RTL, 4), (Mission.KILL_TERMINATE, 4),
+        (Mission.TAKE_OFF, 4), (Mission.SWARM_TRAJECTORY, 4), (Mission.QUICKSCOUT, 4),
+    ])
+    async def test_scheduler_uses_preparation_lead_only_for_gated_show_executors(self, mission, lead):
+        from src.drone_setup import DroneSetup
+        params = Mock(trigger_sooner_seconds=4, SYNCHRONIZED_SHOW_PREPARATION_SEC=10)
+        drone_config = create_mock_drone_config()
+        drone_config.mission = mission.value
+        drone_config.state = State.MISSION_READY.value
+        drone_config.trigger_time = 200
+        setup = DroneSetup(params, drone_config)
+        handler = AsyncMock(return_value=(False, 'test'))
+        setup.mission_handlers[mission.value] = handler
+        with patch('src.drone_setup.time.time', return_value=190):
+            await setup.schedule_mission()
+        handler.assert_awaited_once_with(190, 200 - lead)
+        assert drone_config.trigger_time == 200
+
+    @pytest.mark.asyncio
+    async def test_earlier_show_preparation_preserves_the_actual_child_trigger(self):
+        from src.drone_setup import DroneSetup
+        params = Mock(trigger_sooner_seconds=4, SYNCHRONIZED_SHOW_PREPARATION_SEC=10,
+            main_offboard_executer='drone_show.py')
+        drone_config = create_mock_drone_config()
+        drone_config.mission = Mission.DRONE_SHOW_FROM_CSV.value
+        drone_config.state = State.MISSION_READY.value
+        drone_config.trigger_time = 200
+        setup = DroneSetup(params, drone_config)
+        setup.execute_mission_script = AsyncMock(return_value=(True, 'started'))
+        with patch('src.drone_setup.time.time', return_value=189):
+            await setup.schedule_mission()
+        setup.execute_mission_script.assert_not_awaited()
+        with patch('src.drone_setup.time.time', return_value=190):
+            await setup.schedule_mission()
+        args = setup.execute_mission_script.await_args.args
+        assert args[0] == 'drone_show.py'
+        assert '--start_time=200' in args[1]
 
     @pytest.mark.asyncio
     async def test_scheduler_holds_shared_state_transaction_through_handler(self):
@@ -1056,6 +1098,39 @@ class TestScriptExecution:
         assert lifecycle["state"] == State.MISSION_EXECUTING.value
 
     @pytest.mark.asyncio
+    async def test_coordinated_takeoff_context_uses_anonymous_fd_not_command_line(self):
+        import json
+        from src.drone_setup import DroneSetup
+        from src.action_runners.coordinated_takeoff import TAKEOFF_CONTEXT_FD_ENV
+        params = Mock()
+        params.trigger_sooner_seconds = 4
+        params.COMMAND_IDEMPOTENCY_HISTORY_SEC = 1800
+        params.COMMAND_IDEMPOTENCY_MAX_HISTORY = 256
+        params.GCS_IP, params.gcs_api_port = "127.0.0.1", 5030
+        config = create_mock_drone_config()
+        config.current_command_id, config.mission, config.takeoff_mode = "group-op", Mission.TAKE_OFF.value, "coordinated"
+        setup = DroneSetup(params, config)
+        setup.register_command_report_capability("group-op", "secret"*9)
+        process = Mock(pid=4321, returncode=None)
+        captured = {}
+        async def spawn(*args, **kwargs):
+            descriptor = int(kwargs["env"][TAKEOFF_CONTEXT_FD_ENV])
+            captured.update(json.loads(os.read(descriptor, 8192)))
+            assert descriptor in kwargs["pass_fds"]
+            assert "secret" not in str(args)
+            return process
+        def task(coro):
+            coro.close()
+            return Mock()
+        with patch('src.drone_setup.os.path.isfile', return_value=True), \
+             patch('src.drone_setup.asyncio.create_subprocess_exec', side_effect=spawn), \
+             patch('src.drone_setup.asyncio.create_task', side_effect=task):
+            result = await setup.execute_mission_script("actions.py", "--action=takeoff --altitude=10")
+        assert result[0]
+        assert captured == dict(command_id="group-op", hw_id="1", capability="secret"*9,
+            url="http://127.0.0.1:5030/api/v1/command-reports/takeoff-stage")
+
+    @pytest.mark.asyncio
     async def test_execute_reserves_launching_lifecycle_before_subprocess_creation(self):
         """Duplicate lookup sees accepted ownership during the detach/spawn gap."""
         from src.drone_setup import DroneSetup
@@ -1202,7 +1277,7 @@ class TestActionMissionHandlerRouting:
             ("_execute_reboot_sys", "System Reboot Mission", "actions.py", "--action=reboot_sys", None),
             ("_execute_precision_move", "Precision Move Mission", "actions.py", "--action=precision_move --request-file=/tmp/precision_move_1_cmd-xyz.json", "recovery"),
             ("_execute_test_led", "LED Test Mission", "test_led_controller.py", "--action=start", None),
-            ("_execute_swarm_trajectory", "Swarm Trajectory Mission", "swarm_trajectory_mission.py", "", "normal"),
+            ("_execute_swarm_trajectory", "Swarm Trajectory Mission", "swarm_trajectory_mission.py", "--position_id 1 --trajectory_sha256 " + 'a' * 64, "normal"),
         ],
     )
     async def test_handlers_use_execute_immediate_launcher(

@@ -7,20 +7,24 @@ import { getPlotThemeColors } from '../utilities/plotThemeColors';
 import '../styles/SwarmFormation3D.css';
 
 const EMPTY = {};
+const DEFAULT_MOVEMENT_PLANE = 'all';
 
 function Aircraft({ label, selected, leader, colors, onSelect }) {
   return <>
-    <mesh onClick={(event) => { event.stopPropagation(); onSelect(); }}>
-      {leader ? <octahedronGeometry args={[0.4]} /> : <boxGeometry args={[0.55, 0.16, 0.55]} />}
-      <meshBasicMaterial color={selected ? colors.success : colors.info} />
-    </mesh>
+    <group onClick={(event) => { event.stopPropagation(); onSelect(); }}>
+      <mesh><boxGeometry args={[.2,.12,.35]}/><meshBasicMaterial color={selected?colors.success:colors.info}/></mesh>
+      {[-Math.PI/4,Math.PI/4].map(angle=><mesh key={angle} rotation={[0,angle,0]}><boxGeometry args={[.75,.05,.055]}/><meshBasicMaterial color={selected?colors.success:colors.info}/></mesh>)}
+      {[[-.25,-.25],[.25,-.25],[-.25,.25],[.25,.25]].map(([x,z])=><mesh key={`${x}:${z}`} position={[x,.04,z]}>
+        <cylinderGeometry args={[.14,.14,.025,20]}/><meshBasicMaterial color={selected?colors.success:colors.info}/>
+      </mesh>)}
+    </group>
     <Html center position={[0, 0.65, 0]} style={{ pointerEvents: 'none' }}>
-      <span className={`swarm-formation-3d__label ${selected ? 'is-selected' : ''}`}>{label}</span>
+      <span className={`swarm-formation-3d__label ${selected ? 'is-selected' : ''}`}>{leader?'★ ':''}{label}</span>
     </Html>
   </>;
 }
 
-export function EditableAircraft({ assignment, position, parentPosition, previewHeadings, onAssignmentChange, onEditBegin, onEditEnd, plane = 'horizontal', viewFrame = 'ned', viewHeading = 0, children }) {
+export function EditableAircraft({ assignment, position, parentPosition, previewHeadings, onAssignmentChange, onEditBegin, onEditEnd, plane = DEFAULT_MOVEMENT_PLANE, viewFrame = 'ned', viewHeading = 0, children }) {
   const transform = useRef();
   const aircraft = useRef();
   const dragging = useRef(false);
@@ -102,7 +106,8 @@ function Scene({ entries, positions, labels, selectedId, previewHeadings, onSele
   }, [zoomRequest, camera, invalidate]);
   useEffect(() => {
     if (!focusRequest || !positionsRef.current[String(selectedId)]) return;
-    const center = new Vector3(...toScene(positionsRef.current[String(selectedId)]));
+    const center = new Vector3(...formationToScene(positionsRef.current[String(selectedId)],
+      viewRef.current.viewFrame, viewRef.current.viewHeading));
     const direction = camera.position.clone().sub(controls.current?.target || new Vector3());
     camera.position.copy(center).add(direction);
     camera.lookAt(center);
@@ -156,7 +161,7 @@ class SceneBoundary extends React.Component {
 /** Lazy-load this component from Design; it has no network or aircraft side effects. */
 export default function SwarmFormation3D({ assignments, configData = [], selectedId, onSelect, onAssignmentChange, previewHeadings = EMPTY, onEditBegin, onEditEnd, clusterId, viewFrame = 'ned', viewHeading = 0, aircraftLabels = EMPTY, compact = false, linkedViews = false, viewportCommand = null, onViewportCommand }) {
   const [fitRequest, setFitRequest] = useState(0);
-  const [plane, setPlane] = useState('horizontal');
+  const [plane, setPlane] = useState(DEFAULT_MOVEMENT_PLANE);
   const [editing, setEditing] = useState(false);
   const [zoomRequest, setZoomRequest] = useState({ sequence: 0, factor: 1 });
   const [focusRequest, setFocusRequest] = useState(0);
@@ -182,7 +187,7 @@ export default function SwarmFormation3D({ assignments, configData = [], selecte
     if (viewportCommand.action === 'focus') setFocusRequest((value) => value + 1);
     if (viewportCommand.action === 'zoom-in') zoom(0.8);
     if (viewportCommand.action === 'zoom-out') zoom(1.25);
-  }, [viewportCommand?.sequence]);
+  }, [viewportCommand?.sequence, viewportCommand?.action]);
   const axes = formationViewLabels(viewFrame);
   return <section className={`swarm-formation-3d ${compact ? 'is-compact' : ''}`} aria-label="3D formation editor">
     <div className="swarm-formation-tools" role="toolbar" aria-label="3D view controls">
@@ -191,7 +196,7 @@ export default function SwarmFormation3D({ assignments, configData = [], selecte
       <button type="button" disabled={editing} aria-label="Zoom 3D view out" onClick={() => linkedViews ? onViewportCommand?.('zoom-out') : zoom(1.25)}>−</button>
       <button type="button" disabled={editing || !selectedId} onClick={() => linkedViews ? onViewportCommand?.('focus') : setFocusRequest((value) => value + 1)}>Focus</button>
       <label className="swarm-formation-3d__plane">Move <select aria-label="3D movement plane" value={plane} disabled={editing} onChange={(event) => setPlane(event.target.value)}>
-        <option value="horizontal">{axes.axis1} / {axes.axis2}</option><option value="east-up">{axes.axis2} / Up</option><option value="north-up">{axes.axis1} / Up</option>
+        <option value="all">All directions</option><option value="horizontal">{axes.axis1} / {axes.axis2}</option><option value="east-up">{axes.axis2} / Up</option><option value="north-up">{axes.axis1} / Up</option>
       </select></label>
     </div>
     {geometry.error ? <p role="status">Resolve the follow chain to preview this formation.</p>

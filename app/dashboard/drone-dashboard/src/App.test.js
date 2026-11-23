@@ -15,6 +15,7 @@ jest.mock('./components/SidebarMenu', () => ({ collapsed, mobile, mobileOpen }) 
   />
 ));
 jest.mock('./components/SyncWarningBanner', () => () => null);
+jest.mock('./components/CommandActivityPanel', () => () => <section data-testid="command-activity" />);
 jest.mock('./components/ErrorBoundary', () => ({ children }) => <>{children}</>);
 jest.mock('./contexts/CommandActivityContext', () => ({
   CommandActivityProvider: ({ children }) => <>{children}</>,
@@ -36,15 +37,14 @@ jest.mock('./hooks/useGcsRuntimeStatus', () => ({
 // Mock lazy-loaded pages — must return { default: Component } for React.lazy
 jest.mock('./pages/SwarmDesign', () => ({ __esModule: true, default: () => <div data-testid="swarm-design" /> }));
 jest.mock('./pages/DroneShowWorkspace', () => ({ __esModule: true, default: () => <div data-testid="drone-show-workspace" /> }));
-jest.mock('./pages/CustomShowPage', () => ({ __esModule: true, default: () => <div data-testid="custom-show" /> }));
+jest.mock('./pages/CustomShowWorkspace', () => ({ __esModule: true, default: () => <div data-testid="custom-show" /> }));
 jest.mock('./pages/GlobeView', () => ({ __esModule: true, default: () => <div data-testid="globe-view" /> }));
-jest.mock('./pages/SwarmTrajectory', () => ({ __esModule: true, default: () => <div data-testid="swarm-trajectory" /> }));
+jest.mock('./pages/SwarmTrajectoryWorkspace', () => ({ __esModule: true, default: () => <div data-testid="swarm-trajectory" /> }));
 jest.mock('./pages/TrajectoryPlanning', () => ({ __esModule: true, default: () => <div data-testid="trajectory-planning" /> }));
 jest.mock('./pages/QuickScoutPage', () => ({ __esModule: true, default: () => <div data-testid="quickscout" /> }));
 jest.mock('./pages/FleetEnrollmentPage', () => ({ __esModule: true, default: () => <div data-testid="fleet-enrollment" /> }));
 jest.mock('./pages/SimurghOperatorPage', () => ({ __esModule: true, default: () => <div data-testid="simurgh-operator" /> }));
 jest.mock('./pages/LogViewer', () => ({ __esModule: true, default: () => <div data-testid="log-viewer" /> }));
-jest.mock('./components/DroneDetail', () => ({ __esModule: true, default: () => <div data-testid="drone-detail" /> }));
 
 // Mock services
 jest.mock('./services/logService', () => ({
@@ -80,6 +80,7 @@ describe('App', () => {
     render(<App />);
     expect(await screen.findByTestId('sidebar')).toBeInTheDocument();
     expect(await screen.findByTestId('overview')).toBeInTheDocument();
+    expect(screen.getByTestId('command-activity')).toBeInTheDocument();
   });
 
   test('renders sidebar navigation', async () => {
@@ -94,6 +95,9 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: /dashboard guide/i })).toHaveAttribute(
       'href',
       expect.stringContaining('/docs/guides/dashboard-operator.md')
+    );
+    expect(screen.getByRole('link', { name: /dashboard guide/i }).closest('.shell-operations-strip')).toContainElement(
+      screen.getByTestId('command-activity')
     );
   });
 
@@ -140,5 +144,20 @@ describe('App', () => {
       'href',
       expect.stringContaining('/docs/guides/simurgh-operator.md')
     );
+  });
+
+  test('redirects legacy route-editor bookmarks to the single mission Plan', async () => {
+    window.history.pushState({}, '', '/trajectory-planning');
+    render(<App />);
+    expect(await screen.findByTestId('swarm-trajectory')).toBeInTheDocument();
+    expect(window.location.pathname + window.location.search).toBe('/swarm-trajectory?tab=plan');
+    expect(screen.queryByTestId('trajectory-planning')).not.toBeInTheDocument();
+  });
+
+  test('old aircraft-detail bookmarks resolve to the canonical Overview', async () => {
+    window.history.pushState({}, '', '/drone-detail');
+    render(<App />);
+    expect(await screen.findByTestId('overview')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/');
   });
 });

@@ -35,6 +35,42 @@ The `mds_node_init.sh` script is an enterprise-grade bootstrap system that confi
 
 ## Quick Start
 
+### Commission a new board without changing a working fleet
+
+Use this order for a first board or an additional aircraft:
+
+1. **Access:** record the human/admin SSH login, reachable LAN/VPN address and
+   sudo access. A VPN device name is not necessarily its Linux login. Confirm
+   the board model, OS, architecture, free storage and stable power before install.
+2. **Identity:** reserve a unique hardware ID on GCS. A hostname, callsign,
+   position slot and leader/follower role are different settings. Do not copy
+   another aircraft's `node_identity.json`, credentials or complete SD image.
+3. **Install:** use the public wrapper below; supply the intended GCS address
+   and repo/branch. Keep an already-working VPN with `--skip-netbird`. Private
+   repositories need a separately authorized **read-only** node credential,
+   never the GCS write key. Preview an existing checkout with `--dry-run` before
+   resuming or changing it; do not treat wrapper bootstrap as a no-write preview.
+4. **Enroll:** announce the candidate, review it in **Fleet Enrollment**, and
+   accept it as an additional aircraft rather than replacing an existing one.
+   Publish the private fleet manifest and verify node sync. Announce alone does
+   not add a drone to the fleet or make it ready for flight.
+5. **Connect the flight controller:** MDS runs on the Linux companion; PX4
+   normally runs on the separate flight controller. A companion with no FC can
+   be provisioned, but cannot pass aircraft readiness. Confirm the actual
+   carrier-board wiring, serial device and baud rate rather than copying
+   settings from a different board. Missing FC telemetry is not a reason to
+   relax preflight checks or install PX4 SITL on real hardware.
+6. **Verify:** confirm services, current repo commit, native telemetry, home and
+   RC/failsafe state. Review the complete formation while all aircraft are
+   landed/disarmed; confirm offsets and frame, then verify all affected nodes
+   received the same saved plan. Check unattended sync once more after a
+   planned restart before field testing. Do not arm from this installation guide.
+
+Changing roles on the ground is a saved formation update, not continuous
+in-flight leader handover. Launch-position-derived offsets are not automatically
+captured by adding a new node. See [Smart Swarm](../features/smart-swarm.md) for
+the currently supported operational scope.
+
 ### Option 1: One-Line Installation (Recommended)
 
 Use this on a fresh companion-computer host that does not already have the MDS
@@ -164,10 +200,12 @@ node.
 SSH into the companion computer:
 
 ```bash
-ssh pi@raspberrypi.local
+ssh <human-admin-user>@<node-ip-or-hostname>
 ```
 
-Update the system:
+Check the installed OS updates with your site administrator. On a new, unused
+board, update packages before installing MDS; do not run an unattended OS upgrade
+on an aircraft already in operation:
 
 ```bash
 sudo apt update && sudo apt upgrade -y
@@ -241,7 +279,8 @@ sudo ./tools/mds_node_init.sh -d 1 \
 For private customer repositories, provision repo access before expecting reboot
 sync to work unattended:
 
-1. Generate a separate read-only SSH key for each drone or provisioned image.
+1. Generate a separate read-only SSH key on each drone after imaging; do not
+   include a shared private Git key in a reusable board image.
 2. Add the public key under GitHub repository **Settings -> Deploy keys** without
    write access.
 3. Put the private key on the node with owner `droneshow` and mode `0600`.
@@ -282,7 +321,7 @@ The script runs through these phases automatically:
 | 5. Environment | Sets up environment variables |
 | 6. Firewall | Configures UFW rules for MDS services |
 | 7. Python Environment | Creates venv, installs requirements |
-| 8. MAVSDK | Downloads and installs MAVSDK binary |
+| 8. MAVSDK | Verifies/provisions the manifest-pinned server; preserves the previous artifact on failure |
 | 9. Services | Installs and enables systemd services |
 | 10. NTP | Configures time synchronization |
 | 11. Netbird | (Optional) Configures VPN access |
@@ -370,6 +409,36 @@ systemctl status coordinator
 systemctl status git_sync_mds
 ```
 
+Also check the effective configuration **as the runtime user**, not only as root:
+
+```bash
+sudo -u droneshow -H bash -lc 'cd ~/mavsdk_drone_show && venv/bin/python -c "from src.params import Params; print(Params.runtime_mode, Params.GCS_IP)"'
+```
+
+For real hardware this must report `real` and the intended GCS address. A
+root-readable identity report or an active service does not prove the runtime
+user can read `/etc/mds/local.env`. Keep that file readable by the runtime user;
+credential **contents** belong in separately protected secret files. Repeat this
+check and verify live FC telemetry and successful Git fetch after a companion
+reboot. Do not clear readiness failures merely to make the dashboard green.
+
+### MAVLink identity and optional LEDs
+
+MDS hardware ID, fleet position, hostname, callsign and PX4 `MAV_SYS_ID` are
+separate identities. Each aircraft sharing QGC or another MAVLink network needs
+a unique MAVLink system ID. Set it while grounded/disarmed, verify parameter
+readback, then reboot the FC as required and verify the **transmitted heartbeat
+system ID**. A companion reboot alone does not reboot the separate FC.
+
+The legacy `rpi_ws281x` PWM/DMA backend is selected only on known supported
+pre-RP1 Raspberry Pi hardware. Importing its Python package is not proof of
+hardware compatibility. CM5/Pi5 use the existing optional `Pi5Neo` SPI backend
+when installed and correctly wired/configured; otherwise LED feedback remains
+disabled. Do not enable SPI or install a different kernel driver merely to hide
+an LED warning. LED feedback is not required for Smart Swarm; light-show LED
+hardware needs its own acceptance test. A native driver crash is a real process
+failure, even if a successful action result was emitted before shutdown.
+
 ## Enrollment Follow-Up
 
 Bootstrap and candidate announce do not finish fleet enrollment on their own.
@@ -392,6 +461,16 @@ Check the installation log:
 ```bash
 cat /var/log/mds/mds_init.log
 ```
+
+### Configure remote Wi-Fi dashboard access
+
+If Smart Wi-Fi Manager is enabled, port reachability and edit authorization
+are separate. Keep its default loopback listener for local/proxied use. For a
+direct NetBird browser link, use the pinned sidecar's normal browser login:
+follow [Wi-Fi dashboard setup](smart-wifi-manager-dashboard.md) once on the
+grounded node, then reload the page and sign in. The sidecar owns the local
+credential/hash; ordinary MDS sync preserves it. Do not copy SSH credentials
+into the dashboard, disable remote-write protection or put passwords in Git.
 
 ### Configure MAVLink Routing
 
@@ -472,6 +551,39 @@ If you are using the Holybro Pixhawk RPi CM4 baseboard, the PX4/Holybro docs wir
 - `MAV_1_CONFIG = TELEM2 (102)`
 - `MAV_1_MODE = Onboard (2)`
 - `SER_TEL2_BAUD = 921600`
+
+#### CM5 on the Holybro carrier
+
+The [Holybro CM4/5 carrier](https://docs.holybro.com/autopilot/pixhawk-baseboards/pixhawk-rpi-cm4-5-baseboard/connections-and-ports)
+supports either compute module. Its internal TELEM2 connection uses GPIO14/15
+and optional flow-control GPIO16/17. The carrier and the compute module are
+different components; a CM5 product listing alone does not identify its carrier.
+
+Do not copy a CM4's `/dev/ttyS0` setting onto a CM5. On Pi 5-class hardware,
+`/dev/serial0` may instead point to the dedicated debug UART (`ttyAMA10`),
+which can already host the Linux console. Check the actual device and console:
+
+```bash
+ls -l /dev/serial* /dev/ttyAMA* 2>/dev/null
+cat /proc/cmdline
+dtoverlay -h uart0-pi5
+pinctrl get 14-17
+```
+
+For this confirmed carrier, a fresh CM5 image may need the GPIO UART enabled
+in `/boot/firmware/config.txt` using `dtoverlay=uart0-pi5` (add `,ctsrts` when
+using its connected hardware flow-control pins). Back up the boot configuration,
+follow the [Raspberry Pi UART documentation](https://www.raspberrypi.com/documentation/computers/configuration.html#configure-device-tree-overlays-for-uarts),
+and reboot the **companion**, not the flight controller. Verify the resulting
+device, normally `/dev/ttyAMA0`, and actual incoming PX4 telemetry before passing
+that device with `--mavlink-uart` and the matching baud with `--mavlink-baud`.
+Do not point MAVLink routing at an active console or assume another carrier
+uses these pins. This is host-specific setup, not a fleet-wide serial default.
+
+After reinstalling the companion OS, recheck GPIO overlays, network access and
+the new VPN address, then provision a fresh per-node Git credential. Settings
+stored on the separate PX4 flight controller do not restore Linux UART settings.
+Retire an obsolete deploy key only after verifying its replacement works.
 
 If you want the web dashboard reachable from the LAN or VPN, expose it explicitly:
 

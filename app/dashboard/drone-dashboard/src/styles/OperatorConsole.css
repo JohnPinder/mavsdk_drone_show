@@ -5,12 +5,13 @@
 }
 .operator-console :is(.operator-button, .operator-action-icon-button, .operator-status-badge,
   .operator-docs-link, .operator-card, .operator-page-shell__icon, .operator-notice,
-  .operator-confirm-dialog__panel, .operator-confirm-dialog__close) {
+  .operator-confirm-dialog__panel, .operator-confirm-dialog__close,
+  .mission-dialog__panel, .mission-dialog__close) {
   border-radius: var(--console-corner);
   box-shadow: none;
 }
 .operator-console :is(button, input, select) { font: inherit; }
-.operator-console :is(input, select) {
+.operator-console :is(input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']), select) {
   min-width: 0;
   max-width: 100%;
   min-height: var(--console-control-height);
@@ -33,13 +34,16 @@
 }
 .operator-console label { display: grid; gap: var(--spacing-xs); }
 .operator-console .operator-confirm-dialog__panel { width: min(100%, 38rem); }
+.operator-confirm-dialog__panel.operator-confirm-dialog__panel--wide { width: min(100%, 70rem); }
 .operator-console .operator-confirm-dialog__actions {
   position: sticky;
   bottom: 0;
   background: var(--color-bg-primary);
 }
 .operator-console .operator-confirm-dialog__message { line-height: 1.5; }
-.operator-console .operator-confirm-dialog__message :is(input, select) { width: 100%; }
+/* Only text-like controls fill the dialog. Full-width radios/checkboxes push
+   the source/aircraft labels outside their selection rows. */
+.operator-console .operator-confirm-dialog__message :is(input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']), select) { width: 100%; }
 .operator-console .operator-confirm-dialog__message small { display: block; color: var(--color-text-secondary); }
 .operator-console .operator-confirm-dialog__message ul { padding-left: var(--spacing-lg); }
 .operator-console .operator-confirm-dialog__message li { margin-block: var(--spacing-sm); }

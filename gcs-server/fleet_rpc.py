@@ -28,12 +28,14 @@ from src.enums import CommandErrorCode, CommandResultCategory, Mission
 from src.live_armability_utils import calculate_live_armability_request_timeout
 from src.drone_api_routes import (
     DRONE_STATE_ROUTE,
+    DRONE_LIVE_ARMABILITY_ROUTE,
     DRONE_LAUNCH_PREPARATION_ROUTE,
     DRONE_SWARM_STATE_ROUTE,
 )
 from src.smart_swarm_admission import SmartSwarmStartAdmission
+from src.live_armability_contract import LiveArmabilityTrustEnvelope
 from target_command_payloads import validate_per_target_payloads
-from src.command_execution_contract import mission_requires_launch_armability_probe
+from src.command_execution_contract import mission_requires_launch_armability_probe, ground_start_observation_ready
 from src.launch_preparation_protocol import (
     LAUNCH_PREPARATION_TOKEN_HEADER,
     LaunchPreparationRequest,
@@ -201,6 +203,13 @@ class FleetRPCService:
 
     async def review_swarm_start(self, drones: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Read the node's existing admission decision; never reserve or command."""
+        return await self._review_swarm_admission(drones, 'smart_swarm_start_admission')
+
+    async def review_swarm_references(self, drones: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Read-only airborne source eligibility; never restart a busy leader."""
+        return await self._review_swarm_admission(drones, 'smart_swarm_reference_admission')
+
+    async def _review_swarm_admission(self, drones, field):
         client = await self._client_or_start()
         timeout = max(0.2, float(getattr(self.params, 'GCS_COMMAND_HTTP_TIMEOUT_SEC', 5)))
 
@@ -215,10 +224,14 @@ class FleetRPCService:
                 response = await client.get(
                     f"http://{drone['ip']}:{self.params.drone_api_port}{DRONE_STATE_ROUTE}", timeout=timeout)
                 response.raise_for_status()
-                decision = SmartSwarmStartAdmission.model_validate(response.json().get('smart_swarm_start_admission'))
+                decision = SmartSwarmStartAdmission.model_validate(response.json().get(field))
                 if decision.hw_id != _normalize_drone_id(drone):
                     return unavailable(drone)
                 value = decision.model_dump()
+                if field == 'smart_swarm_reference_admission':
+                    payload = response.json()
+                    value['swarm_active'] = payload.get('smart_swarm_active') is True
+                    value['live_follow'] = payload.get('follow_mode')
                 # Source validity minus our complete round-trip; never compare
                 # the GCS wall clock with a companion's clock.
                 remaining = max(0, decision.valid_for_ms - int((time.monotonic() - started) * 1000))
@@ -238,6 +251,110 @@ class FleetRPCService:
             if value['status'] == 'ready' and not value['valid_for_ms']:
                 values[key] = unavailable(drone)
         return values
+
+    async def read_swarm_samples(self, drones: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Bounded read-only native samples; retain source clocks and local RTT.
+
+        Capture validates identity, source ages and local runtime activity. A
+        transport success alone does not establish usable position evidence.
+        """
+        client = await self._client_or_start()
+        timeout = min(2.0, max(0.2, float(getattr(self.params, 'GCS_COMMAND_HTTP_TIMEOUT_SEC', 5))))
+
+        def unavailable(drone):
+            return {'sample': {}, 'error': 'Native swarm sample unavailable'}
+
+        async def read(drone):
+            started = time.monotonic()
+            try:
+                response = await client.get(
+                    f"http://{drone['ip']}:{self.params.drone_api_port}{DRONE_SWARM_STATE_ROUTE}", timeout=timeout)
+                response.raise_for_status()
+                sample = response.json()
+                if not isinstance(sample, dict) or str(sample.get('hw_id')) != _normalize_drone_id(drone):
+                    return unavailable(drone)
+                received = time.monotonic()
+                return {'sample': sample, 'round_trip_ms': max(0, int((received - started) * 1000)),
+                        'received_at_ms': int(time.time() * 1000), 'received_monotonic': received}
+            except (httpx.HTTPError, ValueError, TypeError):
+                return unavailable(drone)
+
+        return await self._bounded_map(drones, read, recovery=False,
+            deadline_sec=timeout, deadline_result=unavailable)
+
+    async def review_takeoff(self, drones: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Read mission-specific native admission without reserving or arming."""
+        client = await self._client_or_start()
+        timeout = calculate_live_armability_request_timeout(params=self.params)
+
+        def unavailable(drone):
+            return dict(hw_id=_normalize_drone_id(drone), status='unavailable',
+                        reason='Checking aircraft', valid_for_ms=0, coordinated_takeoff_supported=False)
+
+        async def read(drone):
+            started = time.monotonic()
+            try:
+                response = await client.get(
+                    f"http://{drone['ip']}:{self.params.drone_api_port}{DRONE_LIVE_ARMABILITY_ROUTE}",
+                    params={'require_global_position': 'true', 'mission_type': 10}, timeout=timeout)
+                response.raise_for_status()
+                envelope = LiveArmabilityTrustEnvelope.model_validate(response.json())
+                if envelope.hw_id != _normalize_drone_id(drone):
+                    return unavailable(drone)
+                round_trip_ms = max(0, int((time.monotonic() - started) * 1000))
+                # The node's remaining lease is measured after its live probe.
+                # Subtracting that probe time again would make every valid
+                # one-second observation expire during a 1.4-second probe.
+                # Only transport plus waiting for the rest of the fleet ages it.
+                if envelope.server_processing_ms > round_trip_ms + 20:
+                    return unavailable(drone)
+                transport_ms = max(0, round_trip_ms - envelope.server_processing_ms)
+                remaining = max(0, envelope.remaining_valid_ms - transport_ms)
+                value = dict(hw_id=envelope.hw_id, status='ready' if envelope.ready else 'blocked' if envelope.success else 'unavailable',
+                    reason=envelope.summary, valid_for_ms=remaining,
+                    coordinated_takeoff_supported=envelope.coordinated_takeoff_supported)
+                if envelope.ready and (remaining <= 0 or not ground_start_observation_ready(Mission.TAKE_OFF, envelope.observation)):
+                    return unavailable(drone)
+                value['_expires_monotonic'] = time.monotonic() + remaining / 1000
+                return value
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                return unavailable(drone)
+
+        values = await self._bounded_map(drones, read, recovery=False, deadline_sec=timeout, deadline_result=unavailable)
+        for drone in drones:
+            hw = _normalize_drone_id(drone)
+            value = values.setdefault(hw, unavailable(drone))
+            expires = value.pop('_expires_monotonic', time.monotonic())
+            value['valid_for_ms'] = max(0, int((expires - time.monotonic()) * 1000))
+            if value['status'] == 'ready' and not value['valid_for_ms']:
+                values[hw] = unavailable(drone)
+        return values
+
+    async def review_takeoff_recovery(self, drones: list[dict[str, Any]]) -> list[str]:
+        """Select fresh native airborne AUTO TAKEOFF; node ownership fences commit."""
+        from src.px4_flight_modes import decode_px4_custom_mode
+        client = await self._client_or_start()
+        age_limit_ms = 1000
+
+        async def read(drone):
+            started = time.monotonic()
+            try:
+                response = await client.get(f"http://{drone['ip']}:{self.params.drone_api_port}{DRONE_STATE_ROUTE}", timeout=1)
+                response.raise_for_status()
+                value = response.json()
+                round_trip_ms = (time.monotonic() - started) * 1000
+                ages = [value.get('heartbeat_age_ms'), value.get('landed_state_age_ms')]
+                fresh = all(type(age) in (int, float) and 0 <= age + round_trip_ms <= age_limit_ms for age in ages)
+                main, sub = decode_px4_custom_mode(value.get('flight_mode'))
+                return dict(ready=str(value.get('hw_id')) == _normalize_drone_id(drone)
+                    and fresh and value.get('is_armed') is True and value.get('landed_state') in {2, 3}
+                    and main == 4 and sub in {2, 10})
+            except (httpx.HTTPError, ValueError, TypeError, KeyError):
+                return dict(ready=False)
+
+        values = await self._bounded_map(drones, read, recovery=True, deadline_sec=1,
+            deadline_result=lambda _: dict(ready=False))
+        return [hw for hw, row in values.items() if row.get('ready')]
 
     async def _bounded_map(
         self,
@@ -490,20 +607,20 @@ class FleetRPCService:
                         "drone_ip": drone.get("ip"),
                     }
 
-                if mission == Mission.TAKE_OFF and (
-                    envelope.observation is None
-                    or envelope.observation.mission_type != Mission.TAKE_OFF.value
-                    or envelope.observation.admission is None
-                    or not envelope.observation.admission.ready
-                ):
+                if command_data.get('takeoff_mode') == 'coordinated' and not envelope.coordinated_takeoff_supported:
+                    return dict(drone_id=drone_id, success=False, ready=False, prepare_state='blocked',
+                        category='blocked', summary='Update aircraft software for coordinated takeoff',
+                        error_code=CommandErrorCode.PREFLIGHT_FAILED.value)
+
+                if not ground_start_observation_ready(mission, envelope.observation):
                     return {
                         "drone_id": drone_id, "success": False, "ready": False,
-                        "summary": "Takeoff ground-state readiness was not confirmed",
+                        "summary": "Ground-start readiness was not confirmed",
                         "details": {"observation": envelope.observation.model_dump(mode="json")
                                     if envelope.observation is not None else None},
                         "category": "blocked", "prepare_state": "unavailable",
                         "error_code": CommandErrorCode.PREFLIGHT_FAILED.value,
-                        "error_detail": "A current action-specific Takeoff decision is required; verify node software and readiness",
+                        "error_detail": "A current mission-specific ground-start decision is required; verify node software and readiness",
                         "drone_ip": drone.get("ip"),
                     }
 

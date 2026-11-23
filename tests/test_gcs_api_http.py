@@ -246,6 +246,12 @@ class TestHealthEndpoints:
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == origin
         assert response.headers["access-control-allow-credentials"] == "true"
+        exposed = {value.strip().lower() for value in
+                   response.headers["access-control-expose-headers"].split(",")}
+        assert "*" not in exposed
+        assert {"x-mds-server-time", "content-disposition", "content-length",
+                "x-mds-export-records", "x-mds-export-skipped",
+                "x-mds-export-scope"} <= exposed
 
 
 class TestGlobalHttpErrorBoundary:
@@ -2406,6 +2412,12 @@ class TestCommandEndpoints:
 
         coordinator = DeferredSubmissionCoordinator()
         monkeypatch.setattr(app_fastapi, "command_submission_coordinator", coordinator)
+        # These are in-process route tests with synthetic aircraft, not a
+        # rehearsal against any Docker fleet running beside pytest. The real
+        # callback endpoint guard has separate mismatch/exception coverage.
+        monkeypatch.setattr(app_fastapi, "sitl_control_service", SimpleNamespace(
+            callback_endpoint_mismatches=lambda _targets: [],
+        ), raising=False)
         return coordinator
 
     def test_submit_command_rejects_malformed_json(self, test_client):
@@ -2645,10 +2657,14 @@ class TestCommandEndpoints:
     @patch('app_fastapi.fleet_rpc_service.dispatch', new_callable=AsyncMock)
     @patch('app_fastapi.load_config')
     @patch('app_fastapi.get_swarm_trajectory_folders')
+    @patch('app_fastapi.swarm_trajectory_service.get_validation_payload')
+    @patch('app_fastapi.swarm_trajectory_service.get_dispatch_package_payload')
     @patch('app_fastapi.swarm_trajectory_service.get_processing_status_payload')
     def test_submit_command_swarm_trajectory_uses_selected_processed_timeout_budget(
         self,
         mock_status,
+        mock_package,
+        mock_validation,
         mock_folders,
         mock_load,
         mock_dispatch,
@@ -2659,6 +2675,8 @@ class TestCommandEndpoints:
         command_submission_runtime,
     ):
         mock_load.return_value = mock_config
+        mock_validation.return_value = {'success': True, 'ready': True, 'blockers': []}
+        mock_package.return_value = {'revision': 'test-revision', 'files': {'1': 'a' * 64}}
         mock_prepare.return_value = _prepared_launch_result(mock_config)
         mock_dispatch.return_value = {
             'success': 1, 'failed': 0, 'offline': 0, 'rejected': 0, 'errors': 0,
